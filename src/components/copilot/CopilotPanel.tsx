@@ -5,13 +5,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
-import { collection, addDoc, getDocs } from 'firebase/firestore';
+import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc } from 'firebase/firestore';
 import { Trip, ItineraryEvent, Day } from '../../types';
 import { 
-  Sparkles, ShieldCheck, Check, RotateCcw, AlertTriangle, HelpCircle, 
+  Trash2, Sparkles, ShieldCheck, Check, RotateCcw, AlertTriangle, HelpCircle, 
   Dog, ChevronRight, Play, Info, CheckCircle2, ThumbsUp, Layers, HelpCircle as HelpIcon 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { DateTime } from 'luxon';
 
 interface CopilotPanelProps {
   trip: Trip;
@@ -47,6 +48,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
   const [isExecutingAction, setIsExecutingAction] = useState(false);
   const [actionResponse, setActionResponse] = useState<string>('');
   const [actionError, setActionError] = useState('');
+  const [proposedChanges, setProposedChanges] = useState<any[]>([]);
+
 
   // Daily Usage Tracking
   const [aiUsageCount, setAiUsageCount] = useState(0);
@@ -165,15 +168,17 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       // 1. Commit Stays (These are added to EVERY DAY as accommodation stops or as a stay item)
       // We will place stays on Day 1 (or make them cover the duration)
       if (wizardData.stays.length > 0 && tripDays.length > 0) {
-        const firstDayId = tripDays[0].id;
-        const staysColl = collection(db, `trips/${trip.id}/days/${firstDayId}/events`);
+        const firstDay = tripDays[0];
+        const staysColl = collection(db, `trips/${trip.id}/events`);
         for (const stay of wizardData.stays) {
           try {
+            const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+            const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
             await addDoc(staysColl, {
               title: `Check-in: ${stay.title}`,
               category: 'stay',
-              startTime: '15:00',
-              endTime: '16:00',
+              startDateTime: startLocal.toISO(),
+              endDateTime: endLocal.toISO(),
               timezone: 'America/New_York',
               locationName: stay.locationName,
               address: stay.address,
@@ -183,7 +188,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
               reservationNumber: `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
             });
           } catch (err) {
-            handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/days/${firstDayId}/events`);
+            handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
             throw err;
           }
         }
@@ -191,17 +196,28 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
       // Helper to add list of suggested items to respective days in Firestore
       const commitItems = async (items: any[], category: string) => {
+        const eventsColl = collection(db, `trips/${trip.id}/events`);
         for (const item of items) {
           const dayIdx = item.dayIndex || 0;
           if (dayIdx >= 0 && dayIdx < tripDays.length) {
             const targetDay = tripDays[dayIdx];
-            const eventColl = collection(db, `trips/${trip.id}/days/${targetDay.id}/events`);
+            const itemStartTime = item.startTime || '10:00';
+            const itemEndTime = item.endTime || '11:30';
+
+            const startLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemStartTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+            const endLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemEndTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+
+            let finalEndLocal = endLocal;
+            if (endLocal < startLocal) {
+              finalEndLocal = endLocal.plus({ days: 1 });
+            }
+
             try {
-              await addDoc(eventColl, {
+              await addDoc(eventsColl, {
                 title: item.title,
                 category: category,
-                startTime: item.startTime || '10:00',
-                endTime: item.endTime || '11:30',
+                startDateTime: startLocal.toISO(),
+                endDateTime: finalEndLocal.toISO(),
                 timezone: 'America/New_York',
                 locationName: item.locationName,
                 address: item.address,
@@ -210,7 +226,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                 dogFriendly: trip.petFriendly,
               });
             } catch (err) {
-              handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/days/${targetDay.id}/events`);
+              handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
               throw err;
             }
           }
@@ -247,6 +263,59 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     }
   };
 
+  // Day-to-Day Handlers
+  const handleAcceptChange = async (change: any, index: number) => {
+    if (userRole === 'viewer') return;
+    try {
+      const currentDay = days.find(d => d.id === selectedDayId);
+      if (!currentDay) return;
+      const eventsColl = collection(db, `trips/${trip.id}/events`);
+      
+      let startDateTime = '', endDateTime = '';
+      if (change.event && change.event.startTime && change.event.endTime) {
+        const startLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.startTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+        const endLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.endTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+        let finalEndLocal = endLocal;
+        if (endLocal < startLocal) finalEndLocal = endLocal.plus({ days: 1 });
+        startDateTime = startLocal.toISO();
+        endDateTime = finalEndLocal.toISO();
+      }
+
+      if (change.type === 'add') {
+        await addDoc(eventsColl, {
+          title: change.event.title,
+          category: change.event.category || 'activity',
+          startDateTime,
+          endDateTime,
+          timezone: 'America/New_York',
+          locationName: change.event.locationName || change.event.title,
+          notes: change.event.notes || '',
+          dogFriendly: trip.petFriendly,
+          source: 'ai-suggested'
+        });
+      } else if (change.type === 'update' && change.eventId) {
+        const docRef = doc(db, `trips/${trip.id}/events`, change.eventId);
+        await updateDoc(docRef, {
+          title: change.event.title,
+          startDateTime,
+          endDateTime,
+          source: 'ai-suggested'
+        });
+      } else if (change.type === 'delete' && change.eventId) {
+        const docRef = doc(db, `trips/${trip.id}/events`, change.eventId);
+        await deleteDoc(docRef);
+      }
+      
+      setProposedChanges(prev => prev.filter((_, i) => i !== index));
+    } catch (e) {
+      console.error(e);
+      alert("Failed to apply change");
+    }
+  };
+
+  const handleRejectChange = (index: number) => {
+    setProposedChanges(prev => prev.filter((_, i) => i !== index));
+  };
   // 4. Interactive Day-by-Day Copilot Actions
   const handleCopilotAction = async (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
     if (isQuotaReached) {
@@ -259,15 +328,25 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
     try {
       // Fetch current day events to pass to Gemini
-      const eventsRef = collection(db, `trips/${trip.id}/days/${selectedDayId}/events`);
+      const currentDay = days.find(d => d.id === selectedDayId);
+      if (!currentDay) {
+        throw new Error("No active day selected.");
+      }
+
+      const eventsRef = collection(db, `trips/${trip.id}/events`);
       let eventsSnap;
       try {
         eventsSnap = await getDocs(eventsRef);
       } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/days/${selectedDayId}/events`);
+        handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/events`);
         throw err;
       }
-      const currentEvents = eventsSnap.docs.map(doc => doc.data());
+      const currentEvents = eventsSnap.docs
+        .map(doc => doc.data())
+        .filter(data => {
+          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
+          return startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr;
+        });
 
       const response = await fetch('/api/copilot/action', {
         method: 'POST',
@@ -282,6 +361,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       const res = await response.json();
       if (res.success) {
         setActionResponse(res.advice);
+        setProposedChanges(res.proposedChanges || []);
         incrementAiUsage();
       } else {
         setActionError(res.error || 'Failed to execute Copilot suggestion.');
@@ -512,9 +592,52 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                   <span>{actionError}</span>
                 </div>
               ) : actionResponse ? (
+
                 <div className="flex flex-col gap-1.5">
                   {renderMarkdownText(actionResponse)}
+                  {proposedChanges.length > 0 && (
+                    <div className="mt-4 flex flex-col gap-2">
+                      <div className="text-[10px] font-mono text-slate-400 uppercase font-bold tracking-wider mb-1">Proposed Changes</div>
+                      {proposedChanges.map((change, idx) => (
+                        <div key={idx} className="bg-slate-900 border border-slate-700 rounded-lg p-2.5 flex flex-col gap-2 relative overflow-hidden group">
+                           {change.type === 'delete' && <div className="absolute inset-0 bg-red-950/20 pointer-events-none" />}
+                           {change.type === 'add' && <div className="absolute inset-0 bg-emerald-950/20 pointer-events-none" />}
+                           {change.type === 'update' && <div className="absolute inset-0 bg-amber-950/20 pointer-events-none" />}
+                           <div className="relative flex justify-between items-start">
+                             <div className="flex flex-col">
+                               <div className="flex items-center gap-1.5">
+                                 <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${change.type === 'add' ? 'bg-emerald-900 text-emerald-300' : change.type === 'delete' ? 'bg-red-900 text-red-300' : 'bg-amber-900 text-amber-300'}`}>
+                                   {change.type}
+                                 </span>
+                                 <span className="text-xs font-bold text-white">{change.event?.title || 'Event'}</span>
+                               </div>
+                               {change.type !== 'delete' && (
+                                 <span className="text-[10px] text-slate-400 mt-1">{change.event?.startTime} - {change.event?.endTime}</span>
+                               )}
+                             </div>
+                             <div className="flex items-center gap-1">
+                               <button 
+                                 onClick={() => handleAcceptChange(change, idx)}
+                                 className="p-1 rounded bg-slate-800 hover:bg-emerald-900 text-slate-400 hover:text-emerald-400 transition"
+                                 title="Accept"
+                               >
+                                 <Check className="h-3 w-3" />
+                               </button>
+                               <button 
+                                 onClick={() => handleRejectChange(idx)}
+                                 className="p-1 rounded bg-slate-800 hover:bg-red-900 text-slate-400 hover:text-red-400 transition"
+                                 title="Reject"
+                               >
+                                 <Trash2 className="h-3 w-3" />
+                               </button>
+                             </div>
+                           </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
+
               ) : (
                 <div className="flex flex-col items-center justify-center py-10 text-center text-slate-500 gap-1.5">
                   <Info className="h-5 w-5 text-slate-600" />

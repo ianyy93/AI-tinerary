@@ -3,15 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 import { Trip, ItineraryEvent, EventCategory, Day } from '../../types';
 import { 
-  Plus, Edit2, Trash2, MapPin, Clock, Home, Plane, Compass, Utensils, Info, 
+  Plus, Edit2, Trash2, Sparkles, MapPin, Clock, Home, Plane, Compass, Utensils, Info, 
   Dog, AlertCircle, FileText, CheckCircle2, Link, Globe, ChevronRight 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { DateTime } from 'luxon';
 
 interface ItineraryTimelineProps {
   trip: Trip;
@@ -45,14 +46,18 @@ const COMMON_TIMEZONES = [
 
 export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectDay, userRole }: ItineraryTimelineProps) {
   const [events, setEvents] = useState<ItineraryEvent[]>([]);
-  const [isModalOpen, setIsModalOpen] = useState(false);
+    // Pending deletes
+  const [pendingDeletes, setPendingDeletes] = useState<string[]>([]);
+  const deleteTimeouts = useRef<{ [key: string]: NodeJS.Timeout }>({});
+
+const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<ItineraryEvent | null>(null);
 
   // Form states
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<EventCategory>('activity');
-  const [startTime, setStartTime] = useState('09:00');
-  const [endTime, setEndTime] = useState('10:00');
+  const [startDateTimeLocal, setStartDateTimeLocal] = useState('');
+  const [endDateTimeLocal, setEndDateTimeLocal] = useState('');
   const [timezone, setTimezone] = useState('America/New_York');
   const [locationName, setLocationName] = useState('');
   const [address, setAddress] = useState('');
@@ -64,6 +69,8 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
   const [fileUrl, setFileUrl] = useState('');
   const [fileName, setFileName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [filterTravelerId, setFilterTravelerId] = useState<string>('everyone');
+  const [eventTravelerIds, setEventTravelerIds] = useState<string[]>([]);
 
   // Detect user timezone to pre-populate
   useEffect(() => {
@@ -75,28 +82,34 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     }
   }, []);
 
-  // Sync / listen to events for the selected day
+  // Sync / listen to events for the selected day from the flat collection
   useEffect(() => {
-    if (!trip.id || !selectedDayId) return;
+    if (!trip.id || !selectedDayId || !days.length) return;
 
-    const eventsRef = collection(db, `trips/${trip.id}/days/${selectedDayId}/events`);
-    const q = query(eventsRef, orderBy('startTime', 'asc'));
+    const currentDay = days.find(d => d.id === selectedDayId);
+    if (!currentDay) return;
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const eventsRef = collection(db, `trips/${trip.id}/events`);
+
+    const unsubscribe = onSnapshot(eventsRef, (snapshot) => {
       const items: ItineraryEvent[] = [];
       snapshot.forEach((doc) => {
-        items.push({ id: doc.id, ...doc.data() } as ItineraryEvent);
+        const data = doc.data();
+        const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
+        if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
+          items.push({ id: doc.id, ...data } as ItineraryEvent);
+        }
       });
-      // Ensure local chronological sort as fallback
-      items.sort((a, b) => a.startTime.localeCompare(b.startTime));
+      // Sort chronologically by startDateTime
+      items.sort((a, b) => a.startDateTime.localeCompare(b.startDateTime));
       setEvents(items);
     }, (err) => {
       console.error("Error listening to events:", err);
-      handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/days/${selectedDayId}/events`);
+      handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/events`);
     });
 
     return () => unsubscribe();
-  }, [trip.id, selectedDayId]);
+  }, [trip.id, selectedDayId, days]);
 
   // Open modal for addition
   const openAddModal = () => {
@@ -104,8 +117,10 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setEditingEvent(null);
     setTitle('');
     setCategory('activity');
-    setStartTime('09:00');
-    setEndTime('10:00');
+    const currentDay = days.find(d => d.id === selectedDayId);
+    const dateStr = currentDay ? currentDay.dateStr : new Date().toISOString().split('T')[0];
+    setStartDateTimeLocal(`${dateStr}T09:00`);
+    setEndDateTimeLocal(`${dateStr}T10:00`);
     setLocationName('');
     setAddress('');
     setLat('');
@@ -116,6 +131,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setFileUrl('');
     setFileName('');
     setErrorMsg('');
+    setEventTravelerIds([]);
     setIsModalOpen(true);
   };
 
@@ -125,8 +141,12 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setEditingEvent(event);
     setTitle(event.title || '');
     setCategory(event.category || 'activity');
-    setStartTime(event.startTime || '09:00');
-    setEndTime(event.endTime || '10:00');
+
+    const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || 'America/New_York');
+    const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone || 'America/New_York');
+    setStartDateTimeLocal(startLocal.isValid ? startLocal.toFormat("yyyy-MM-dd'T'HH:mm") : '');
+    setEndDateTimeLocal(endLocal.isValid ? endLocal.toFormat("yyyy-MM-dd'T'HH:mm") : '');
+
     setTimezone(event.timezone || 'America/New_York');
     setLocationName(event.locationName || '');
     setAddress(event.address || '');
@@ -137,6 +157,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setDogFriendly(event.dogFriendly || false);
     setFileUrl(event.fileUrl || '');
     setFileName(event.fileName || '');
+    setEventTravelerIds(event.travelerIds || []);
     setErrorMsg('');
     setIsModalOpen(true);
   };
@@ -166,7 +187,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     e.preventDefault();
     if (userRole === 'viewer') return;
 
-    if (!title.trim() || !locationName.trim() || !startTime || !endTime) {
+    if (!title.trim() || !locationName.trim() || !startDateTimeLocal || !endDateTimeLocal) {
       setErrorMsg('Please fill in required fields: Title, Location, and Time slots.');
       return;
     }
@@ -175,11 +196,22 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
       const parsedLat = parseFloat(lat);
       const parsedLng = parseFloat(lng);
 
+      const startLocal = DateTime.fromFormat(startDateTimeLocal, "yyyy-MM-dd'T'HH:mm", { zone: timezone });
+      const endLocal = DateTime.fromFormat(endDateTimeLocal, "yyyy-MM-dd'T'HH:mm", { zone: timezone });
+
+      let finalEndLocal = endLocal;
+      if (endLocal < startLocal) {
+        finalEndLocal = endLocal.plus({ days: 1 });
+      }
+
+      const startDateTime = startLocal.toISO()!;
+      const endDateTime = finalEndLocal.toISO()!;
+
       const eventData: any = {
         title,
         category,
-        startTime,
-        endTime,
+        startDateTime,
+        endDateTime,
         timezone,
         locationName,
         address: address || '',
@@ -188,6 +220,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
         dogFriendly: trip.petFriendly ? dogFriendly : false,
         fileUrl: fileUrl || '',
         fileName: fileName || '',
+        travelerIds: eventTravelerIds,
         updatedAt: new Date().toISOString(),
       };
 
@@ -197,20 +230,20 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
 
       if (editingEvent) {
         // Edit existing
-        const eventDocRef = doc(db, `trips/${trip.id}/days/${selectedDayId}/events`, editingEvent.id);
+        const eventDocRef = doc(db, `trips/${trip.id}/events`, editingEvent.id);
         try {
           await updateDoc(eventDocRef, eventData);
         } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, `trips/${trip.id}/days/${selectedDayId}/events/${editingEvent.id}`);
+          handleFirestoreError(err, OperationType.UPDATE, `trips/${trip.id}/events/${editingEvent.id}`);
           throw err;
         }
       } else {
         // Add new
-        const eventsCollRef = collection(db, `trips/${trip.id}/days/${selectedDayId}/events`);
+        const eventsCollRef = collection(db, `trips/${trip.id}/events`);
         try {
           await addDoc(eventsCollRef, eventData);
         } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/days/${selectedDayId}/events`);
+          handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
           throw err;
         }
       }
@@ -233,18 +266,31 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
   };
 
   // Delete Event
-  const handleDeleteEvent = async (eventId: string, e: React.MouseEvent) => {
+  const handleDeleteEvent = (eventId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (userRole === 'viewer') return;
-    if (!window.confirm("Are you sure you want to delete this event?")) return;
+    
+    // Optimistically hide
+    setPendingDeletes(prev => [...prev, eventId]);
 
-    try {
-      const eventDocRef = doc(db, `trips/${trip.id}/days/${selectedDayId}/events`, eventId);
-      await deleteDoc(eventDocRef);
-    } catch (e: any) {
-      console.error("Error deleting event:", e);
-      handleFirestoreError(e, OperationType.DELETE, `trips/${trip.id}/days/${selectedDayId}/events/${eventId}`);
+    // Schedule actual delete
+    deleteTimeouts.current[eventId] = setTimeout(async () => {
+      try {
+        const eventDocRef = doc(db, `trips/${trip.id}/events`, eventId);
+        await deleteDoc(eventDocRef);
+      } catch (err: any) {
+        console.error("Error deleting event:", err);
+      }
+      setPendingDeletes(prev => prev.filter(id => id !== eventId));
+    }, 5000);
+  };
+
+  const handleUndoDelete = (eventId: string) => {
+    if (deleteTimeouts.current[eventId]) {
+      clearTimeout(deleteTimeouts.current[eventId]);
+      delete deleteTimeouts.current[eventId];
     }
+    setPendingDeletes(prev => prev.filter(id => id !== eventId));
   };
 
   // Get category config helper
@@ -264,13 +310,8 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
         {userRole !== 'viewer' && (
           <button
             onClick={openAddModal}
-            disabled={days.length === 0}
-            className={`flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition ${
-              days.length === 0 
-                ? 'bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed'
-                : 'bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-700'
-            }`}
-            title={days.length === 0 ? "Set a trip date range to plan stops" : "Add Stop"}
+            className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-700"
+            title="Add Stop"
           >
             <Plus className="h-3.5 w-3.5" />
             Add Stop
@@ -315,154 +356,257 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
         </div>
       )}
 
-      {/* Vertical Timeline View */}
-      <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-6" id="timeline-list">
-        {events.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <Compass className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
-            <h4 className="font-display font-bold text-sm text-slate-800">No Stops Planned Yet</h4>
-            <p className="text-xs text-slate-400 max-w-xs mt-1.5">
-              Select our AI travel copilot panel to curate a custom itinerary with a single wizard-wizard flow!
-            </p>
-            {userRole !== 'viewer' && (
-              <button 
-                onClick={openAddModal}
-                className="mt-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-lg border border-slate-200 transition"
-              >
-                Add Custom Stop
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="relative pl-6 flex flex-col gap-5">
-            {/* Timeline connection line */}
-            <div className="absolute top-2 bottom-2 left-[10px] w-0.5 bg-slate-100" />
-
-            {events.map((event, index) => {
-              const cat = getCatConfig(event.category);
-              const Icon = cat.icon;
-
-              // Generate navigation deep-links
-              const mapsSearchQuery = encodeURIComponent(`${event.locationName} ${event.address || ''}`);
-              const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${mapsSearchQuery}`;
-              const appleMapsUrl = `maps://?q=${mapsSearchQuery}`;
-
+      {/* Traveler Filter Control */}
+      {trip.travelers && trip.travelers.length > 0 && (
+        <div className="flex flex-col gap-1.5 mt-3 px-1">
+          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Filter Timeline</label>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              onClick={() => setFilterTravelerId('everyone')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
+                filterTravelerId === 'everyone'
+                  ? 'bg-slate-900 border-slate-900 text-white shadow-sm'
+                  : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              <span>Everyone</span>
+            </button>
+            {trip.travelers.map((traveler) => {
+              const isSelected = filterTravelerId === traveler.id;
+              const initials = traveler.name
+                .split(' ')
+                .map((n) => n[0])
+                .join('')
+                .toUpperCase()
+                .slice(0, 2);
               return (
-                <motion.div 
-                  initial={{ opacity: 0, x: -5 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  key={event.id}
-                  className="relative group bg-white border border-slate-100 hover:border-slate-200/80 rounded-xl p-4 shadow-sm hover:shadow-md transition"
+                <button
+                  key={traveler.id}
+                  onClick={() => setFilterTravelerId(traveler.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition flex items-center gap-1.5 ${
+                    isSelected
+                      ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                      : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                  }`}
                 >
-                  {/* Category icon node on timeline line */}
-                  <div className={`absolute -left-[22px] top-4.5 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm ${cat.colorClass}`}>
-                    <Icon className="h-3 w-3" />
-                  </div>
-
-                  {/* Event content */}
-                  <div className="flex flex-col gap-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
-                          {cat.label}
-                        </span>
-                        {event.dogFriendly && (
-                          <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-0.5 border border-emerald-100" title="Dog Friendly Stop">
-                            <Dog className="h-2.5 w-2.5" />
-                            Dog Friendly
-                          </span>
-                        )}
-                      </div>
-
-                      {userRole !== 'viewer' && (
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
-                          <button
-                            onClick={() => openEditModal(event)}
-                            className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-50 transition"
-                          >
-                            <Edit2 className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            onClick={(e) => handleDeleteEvent(event.id, e)}
-                            className="p-1 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-1.5 mt-1">
-                      <h4 className="font-display font-bold text-sm text-slate-900 group-hover:text-indigo-600 transition leading-tight">
-                        {event.title}
-                      </h4>
-                      <span className="text-[11px] font-mono text-indigo-600 font-bold shrink-0 bg-indigo-50/50 px-2 py-0.5 rounded">
-                        {event.startTime} &mdash; {event.endTime}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1 text-xs text-slate-500 font-medium">
-                      <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                      <span className="truncate">{event.locationName}</span>
-                    </div>
-
-                    {event.notes && (
-                      <p className="text-xs text-slate-500/90 leading-relaxed bg-slate-50/70 p-2.5 rounded-lg border border-slate-100/50 italic mt-1">
-                        {event.notes}
-                      </p>
-                    )}
-
-                    {/* Reservation details & Maps Integration panel */}
-                    {(event.reservationNumber || event.fileUrl) && (
-                      <div className="bg-slate-50/50 border border-slate-100/80 p-2.5 rounded-lg mt-1 flex flex-col gap-1.5">
-                        <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Reservation Info</div>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
-                          {event.reservationNumber && (
-                            <div className="flex items-center gap-1 text-xs font-medium text-slate-700">
-                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                              <span>Code: <b className="font-mono">{event.reservationNumber}</b></span>
-                            </div>
-                          )}
-                          {event.fileUrl && (
-                            <a
-                              href={event.fileUrl}
-                              download={event.fileName || 'reservation-receipt'}
-                              className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:underline"
-                            >
-                              <FileText className="h-3.5 w-3.5" />
-                              <span>View Receipt ({event.fileName ? (event.fileName.length > 15 ? event.fileName.slice(0, 15) + '...' : event.fileName) : 'Attached'})</span>
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Map Navigation Direct Link buttons */}
-                    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-50">
-                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Navigate:</span>
-                      <a 
-                        href={googleMapsUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
-                      >
-                        Google Maps
-                      </a>
-                      <a 
-                        href={appleMapsUrl}
-                        className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
-                      >
-                        Apple Maps
-                      </a>
-                    </div>
-                  </div>
-                </motion.div>
+                  <span className={`h-3.5 w-3.5 rounded-full ${traveler.color || 'bg-slate-500'} text-[8px] font-bold text-white flex items-center justify-center`}>
+                    {initials}
+                  </span>
+                  <span>{traveler.name}</span>
+                </button>
               );
             })}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {(() => {
+        const filteredEvents = events.filter((event) => {
+          if (pendingDeletes.includes(event.id)) return false;
+          if (filterTravelerId === 'everyone') {
+            return true;
+          }
+          return !event.travelerIds || event.travelerIds.length === 0 || event.travelerIds.includes(filterTravelerId);
+        });
+
+        return (
+          <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-6" id="timeline-list">
+            {filteredEvents.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <Compass className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
+                <h4 className="font-display font-bold text-sm text-slate-800">
+                  {events.length === 0 ? 'No Stops Planned Yet' : 'No Stops for this Traveler'}
+                </h4>
+                <p className="text-xs text-slate-400 max-w-xs mt-1.5">
+                  {events.length === 0 
+                    ? 'Select our AI travel copilot panel to curate a custom itinerary with a single wizard-wizard flow!'
+                    : 'This traveler has no specific assignments on any stops for this day.'}
+                </p>
+                {events.length === 0 && userRole !== 'viewer' && (
+                  <button 
+                    onClick={openAddModal}
+                    className="mt-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-lg border border-slate-200 transition"
+                  >
+                    Add Custom Stop
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="relative pl-6 flex flex-col gap-5">
+                {/* Timeline connection line */}
+                <div className="absolute top-2 bottom-2 left-[10px] w-0.5 bg-slate-100" />
+
+                {filteredEvents.map((event, index) => {
+                  const cat = getCatConfig(event.category);
+                  const Icon = cat.icon;
+
+                  // Generate navigation deep-links
+                  const mapsSearchQuery = encodeURIComponent(`${event.locationName} ${event.address || ''}`);
+                  const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${mapsSearchQuery}`;
+                  const appleMapsUrl = `maps://?q=${mapsSearchQuery}`;
+
+                  return (
+                    <motion.div 
+                      initial={{ opacity: 0, x: -5 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.05 }}
+                      key={event.id}
+                      className="relative group bg-white border border-slate-100 hover:border-slate-200/80 rounded-xl p-4 shadow-sm hover:shadow-md transition"
+                    >
+                      {/* Category icon node on timeline line */}
+                      <div className={`absolute -left-[22px] top-4.5 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm ${cat.colorClass}`}>
+                        <Icon className="h-3 w-3" />
+                      </div>
+
+                      {/* Event content */}
+                      <div className="flex flex-col gap-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
+                              {cat.label}
+                            </span>
+                            {event.source && event.source !== 'manual' && (
+                              <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-100 flex items-center gap-1" title="Unverified Generated Entry">
+                                <Sparkles className="h-2.5 w-2.5" />
+                                {event.source === 'wizard' ? 'Wizard' : event.source === 'ai-suggested' ? 'AI Suggestion' : 'Anchor'}
+                              </span>
+                            )}
+                            {event.dogFriendly && (
+                              <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-0.5 border border-emerald-100" title="Dog Friendly Stop">
+                                <Dog className="h-2.5 w-2.5" />
+                                Dog Friendly
+                              </span>
+                            )}
+                          </div>
+
+                          {userRole !== 'viewer' && (
+                            <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
+                              <button
+                                onClick={() => openEditModal(event)}
+                                className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-50 transition"
+                              >
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                onClick={(e) => handleDeleteEvent(event.id, e)}
+                                className="p-1 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-1.5 mt-1">
+                          <h4 className="font-display font-bold text-sm text-slate-900 group-hover:text-indigo-600 transition leading-tight">
+                            {event.title}
+                          </h4>
+                          {(() => {
+                            const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
+                            const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
+                            const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');
+                            const timeStr = isSpanning 
+                              ? `${startLocal.toFormat('MMM dd, HH:mm')} → ${endLocal.toFormat('MMM dd, HH:mm')}`
+                              : `${startLocal.toFormat('HH:mm')} — ${endLocal.toFormat('HH:mm')}`;
+                            return (
+                              <span className="text-[11px] font-mono text-indigo-600 font-bold shrink-0 bg-indigo-50/50 px-2 py-0.5 rounded">
+                                {timeStr}
+                              </span>
+                            );
+                          })()}
+                        </div>
+
+                        {/* Assigned Travelers Initials badges */}
+                        {event.travelerIds && event.travelerIds.length > 0 && trip.travelers && trip.travelers.length > 0 && (
+                          <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                            <span className="text-[9px] text-slate-400 font-medium font-mono uppercase tracking-wider">Travelers:</span>
+                            <div className="flex -space-x-1 overflow-hidden">
+                              {trip.travelers
+                                .filter((t) => event.travelerIds?.includes(t.id))
+                                .map((traveler) => {
+                                  const initials = traveler.name
+                                    .split(' ')
+                                    .map((n) => n[0])
+                                    .join('')
+                                    .toUpperCase()
+                                    .slice(0, 2);
+                                  return (
+                                    <div
+                                      key={traveler.id}
+                                      className={`inline-block h-5 w-5 rounded-full ${traveler.color || 'bg-slate-500'} text-[8px] font-bold text-white flex items-center justify-center ring-2 ring-white select-none`}
+                                      title={traveler.name}
+                                    >
+                                      {initials}
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1 text-xs text-slate-500 font-medium">
+                          <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                          <span className="truncate">{event.locationName}</span>
+                        </div>
+
+                        {event.notes && (
+                          <p className="text-xs text-slate-500/90 leading-relaxed bg-slate-50/70 p-2.5 rounded-lg border border-slate-100/50 italic mt-1">
+                            {event.notes}
+                          </p>
+                        )}
+
+                        {/* Reservation details & Maps Integration panel */}
+                        {(event.reservationNumber || event.fileUrl) && (
+                          <div className="bg-slate-50/50 border border-slate-100/80 p-2.5 rounded-lg mt-1 flex flex-col gap-1.5">
+                            <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Reservation Info</div>
+                            <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
+                              {event.reservationNumber && (
+                                <div className="flex items-center gap-1 text-xs font-medium text-slate-700">
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                  <span>Code: <b className="font-mono">{event.reservationNumber}</b></span>
+                                </div>
+                              )}
+                              {event.fileUrl && (
+                                <a
+                                  href={event.fileUrl}
+                                  download={event.fileName || 'reservation-receipt'}
+                                  className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:underline"
+                                >
+                                  <FileText className="h-3.5 w-3.5" />
+                                  <span>View Receipt ({event.fileName ? (event.fileName.length > 15 ? event.fileName.slice(0, 15) + '...' : event.fileName) : 'Attached'})</span>
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Map Navigation Direct Link buttons */}
+                        <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-50">
+                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Navigate:</span>
+                          <a 
+                            href={googleMapsUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
+                          >
+                            Google Maps
+                          </a>
+                          <a 
+                            href={appleMapsUrl}
+                            className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
+                          >
+                            Apple Maps
+                          </a>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* EVENT ADD/EDIT MODAL */}
       <AnimatePresence>
@@ -525,22 +669,22 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
 
                 <div className="grid grid-cols-3 gap-3">
                   <div className="flex flex-col gap-1">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Start Time *</label>
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Start Date & Time *</label>
                     <input 
-                      type="time" 
+                      type="datetime-local" 
                       required
-                      value={startTime}
-                      onChange={(e) => setStartTime(e.target.value)}
+                      value={startDateTimeLocal}
+                      onChange={(e) => setStartDateTimeLocal(e.target.value)}
                       className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition"
                     />
                   </div>
                   <div className="flex flex-col gap-1">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">End Time *</label>
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">End Date & Time *</label>
                     <input 
-                      type="time" 
+                      type="datetime-local" 
                       required
-                      value={endTime}
-                      onChange={(e) => setEndTime(e.target.value)}
+                      value={endDateTimeLocal}
+                      onChange={(e) => setEndDateTimeLocal(e.target.value)}
                       className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition"
                     />
                   </div>
@@ -633,6 +777,58 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                     className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition"
                   />
                 </div>
+
+                {/* Traveler Assignment Selector */}
+                {trip.travelers && trip.travelers.length > 0 && (
+                  <div className="flex flex-col gap-2 border-t border-slate-100 pt-4">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      Assign Travelers (Split-Trip)
+                    </label>
+                    <p className="text-[11px] text-slate-400">
+                      Select which travelers are participating in this stop. Leave all unchecked/empty for "Everyone".
+                    </p>
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {trip.travelers.map((traveler) => {
+                        const isAssigned = eventTravelerIds.includes(traveler.id);
+                        const initials = traveler.name
+                          .split(' ')
+                          .map((n) => n[0])
+                          .join('')
+                          .toUpperCase()
+                          .slice(0, 2);
+                        return (
+                          <button
+                            type="button"
+                            key={traveler.id}
+                            onClick={() => {
+                              if (isAssigned) {
+                                setEventTravelerIds(eventTravelerIds.filter((id) => id !== traveler.id));
+                              } else {
+                                setEventTravelerIds([...eventTravelerIds, traveler.id]);
+                              }
+                            }}
+                            className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition ${
+                              isAssigned
+                                ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
+                            <span className={`h-4.5 w-4.5 rounded-full ${traveler.color || 'bg-slate-500'} text-[9px] font-bold text-white flex items-center justify-center`}>
+                              {initials}
+                            </span>
+                            <span>{traveler.name}</span>
+                            <input
+                              type="checkbox"
+                              checked={isAssigned}
+                              onChange={() => {}} // Click handled by button
+                              className="h-3 w-3 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300 ml-1"
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-slate-100 pt-4">
                   <div className="flex flex-col gap-1">

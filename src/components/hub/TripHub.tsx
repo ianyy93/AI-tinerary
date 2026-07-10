@@ -12,6 +12,7 @@ import {
   Dog, Shield, Globe, Compass, ArrowRight, Clock, Sparkles, Filter 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { DateTime } from 'luxon';
 
 interface TripHubProps {
   user: UserSession;
@@ -194,42 +195,38 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
     const searchLower = searchQuery.toLowerCase();
     const matches: any[] = [];
 
-    // For each loaded trip, search its events client-side. We fetch the subcollections of loaded trips.
     const fetchAndSearchEvents = async () => {
       for (const trip of trips) {
-        // Query the events for each day or subcollection
         try {
-          const daysRef = collection(db, `trips/${trip.id}/days`);
-          const daysSnap = await getDocs(daysRef);
+          const eventsRef = collection(db, `trips/${trip.id}/events`);
+          const eventsSnap = await getDocs(eventsRef);
           
-          for (const dayDoc of daysSnap.docs) {
-            const eventsRef = collection(db, `trips/${trip.id}/days/${dayDoc.id}/events`);
-            const eventsSnap = await getDocs(eventsRef);
-            
-            eventsSnap.forEach((eventDoc) => {
-              const event = eventDoc.data();
-              const eventTitle = (event.title || '').toLowerCase();
-              const notes = (event.notes || '').toLowerCase();
-              const locationName = (event.locationName || '').toLowerCase();
-              const address = (event.address || '').toLowerCase();
-              const resNum = (event.reservationNumber || '').toLowerCase();
+          eventsSnap.forEach((eventDoc) => {
+            const event = eventDoc.data();
+            const eventTitle = (event.title || '').toLowerCase();
+            const notes = (event.notes || '').toLowerCase();
+            const locationName = (event.locationName || '').toLowerCase();
+            const address = (event.address || '').toLowerCase();
+            const resNum = (event.reservationNumber || '').toLowerCase();
 
-              if (
-                eventTitle.includes(searchLower) ||
-                notes.includes(searchLower) ||
-                locationName.includes(searchLower) ||
-                address.includes(searchLower) ||
-                resNum.includes(searchLower)
-              ) {
-                matches.push({
-                  tripId: trip.id,
-                  tripTitle: trip.title,
-                  event: { id: eventDoc.id, ...event },
-                  dayTitle: dayDoc.data().title || `Day`,
-                });
-              }
-            });
-          }
+            if (
+              eventTitle.includes(searchLower) ||
+              notes.includes(searchLower) ||
+              locationName.includes(searchLower) ||
+              address.includes(searchLower) ||
+              resNum.includes(searchLower)
+            ) {
+              const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || 'America/New_York');
+              const dayStr = startLocal.isValid ? startLocal.toFormat('MMM dd') : 'Event';
+
+              matches.push({
+                tripId: trip.id,
+                tripTitle: trip.title,
+                event: { id: eventDoc.id, ...event },
+                dayTitle: dayStr,
+              });
+            }
+          });
         } catch (e) {
           console.error("Error searching trip events:", e);
         }
@@ -278,7 +275,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         },
         collaboratorEmails: userEmail ? [userEmail] : [],
         collaboratorUids: [user.uid],
-        schemaVersion: 1,
+        schemaVersion: 2,
         createdAt: new Date().toISOString(),
       };
 
@@ -470,36 +467,41 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         }
       }
 
-      // Insert anchor event
-      const finalDayDocId = anchorDayDocId || firstDayDocId;
-      if (finalDayDocId) {
-        const eventsCollRef = collection(db, `trips/${docRef.id}/days/${finalDayDocId}/events`);
-        
-        const eventData: any = {
-          title: confirmedEventTitle,
-          category: confirmedEventCategory,
-          startTime: confirmedEventStartTime,
-          endTime: confirmedEventEndTime,
-          timezone: 'America/New_York',
-          locationName: confirmedEventLocation,
-          address: confirmedEventAddress || '',
-          notes: confirmedEventNotes || '',
-          reservationNumber: confirmedIsBooked ? `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}` : '',
-          dogFriendly: confirmedPetFriendly,
-          isAnchor: true,
-          updatedAt: new Date().toISOString(),
-        };
+      // Insert anchor event flat in trips/{tripId}/events
+      const eventsCollRef = collection(db, `trips/${docRef.id}/events`);
+      
+      const startLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventStartTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+      const endLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventEndTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+      
+      let finalEndLocal = endLocal;
+      if (endLocal < startLocal) {
+        finalEndLocal = endLocal.plus({ days: 1 });
+      }
 
-        if (extractedData?.anchorEvent?.lat !== undefined && extractedData?.anchorEvent?.lng !== undefined) {
-          eventData.coordinates = { lat: extractedData.anchorEvent.lat, lng: extractedData.anchorEvent.lng };
-        }
+      const eventData: any = {
+        title: confirmedEventTitle,
+        category: confirmedEventCategory,
+        startDateTime: startLocal.toISO(),
+        endDateTime: finalEndLocal.toISO(),
+        timezone: 'America/New_York',
+        locationName: confirmedEventLocation,
+        address: confirmedEventAddress || '',
+        notes: confirmedEventNotes || '',
+        reservationNumber: confirmedIsBooked ? `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}` : '',
+        dogFriendly: confirmedPetFriendly,
+        isAnchor: true,
+        updatedAt: new Date().toISOString(),
+      };
 
-        try {
-          await addDoc(eventsCollRef, eventData);
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/days/${finalDayDocId}/events`);
-          throw err;
-        }
+      if (extractedData?.anchorEvent?.lat !== undefined && extractedData?.anchorEvent?.lng !== undefined) {
+        eventData.coordinates = { lat: extractedData.anchorEvent.lat, lng: extractedData.anchorEvent.lng };
+      }
+
+      try {
+        await addDoc(eventsCollRef, eventData);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/events`);
+        throw err;
       }
 
       setIsCreateOpen(false);
@@ -541,7 +543,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         },
         collaboratorEmails: userEmail ? [userEmail] : [],
         collaboratorUids: [user.uid],
-        schemaVersion: 1,
+        schemaVersion: 2,
         createdAt: new Date().toISOString(),
       };
 
@@ -588,7 +590,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         },
         collaboratorEmails: userEmail ? [userEmail] : [],
         collaboratorUids: [user.uid],
-        schemaVersion: trip.schemaVersion,
+        schemaVersion: 2,
         createdAt: new Date().toISOString(),
       };
 

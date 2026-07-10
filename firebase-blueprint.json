@@ -15,6 +15,7 @@
         "status": { "type": "string" },
         "userId": { "type": "string" },
         "collaborators": { "type": "object" },
+        "travelers": { "type": "array" },
         "schemaVersion": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
@@ -38,8 +39,8 @@
       "properties": {
         "title": { "type": "string" },
         "category": { "type": "string" },
-        "startTime": { "type": "string" },
-        "endTime": { "type": "string" },
+        "startDateTime": { "type": "string", "format": "date-time" },
+        "endDateTime": { "type": "string", "format": "date-time" },
         "timezone": { "type": "string" },
         "locationName": { "type": "string" },
         "address": { "type": "string" },
@@ -49,9 +50,10 @@
         "fileUrl": { "type": "string" },
         "fileName": { "type": "string" },
         "updatedAt": { "type": "string", "format": "date-time" },
-        "coordinates": { "type": "object" }
+        "coordinates": { "type": "object" },
+        "travelerIds": { "type": "array" }
       },
-      "required": ["title", "category", "startTime", "endTime", "locationName"]
+      "required": ["title", "category", "startDateTime", "endDateTime", "locationName"]
     }
   },
   "firestore": {
@@ -63,9 +65,9 @@
       "schema": "Day",
       "description": "Days subcollection under a trip"
     },
-    "/trips/{tripId}/days/{dayId}/events/{eventId}": {
+    "/trips/{tripId}/events/{eventId}": {
       "schema": "Event",
-      "description": "Events/stops subcollection under a day"
+      "description": "Events/stops flat subcollection under a trip"
     }
   }
 }

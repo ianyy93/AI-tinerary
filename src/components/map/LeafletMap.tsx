@@ -8,12 +8,14 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-
 import L from 'leaflet';
 import { db } from '../../firebase';
 import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
-import { Trip, ItineraryEvent, EventCategory } from '../../types';
+import { Trip, ItineraryEvent, EventCategory, Day } from '../../types';
 import { MapPin, Navigation, Map as MapIcon, Layers } from 'lucide-react';
+import { DateTime } from 'luxon';
 
 interface LeafletMapProps {
   trip: Trip;
   selectedDayId: string | null;
+  days: Day[];
 }
 
 // Custom map recenterer helper using the useMap hook
@@ -34,33 +36,38 @@ function MapBoundsRecenter({ points }: { points: [number, number][] }) {
   return null;
 }
 
-export default function LeafletMap({ trip, selectedDayId }: LeafletMapProps) {
+export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProps) {
   const [dayEvents, setDayEvents] = useState<ItineraryEvent[]>([]);
 
   // 1. Fetch events with coordinates for this specific day
   useEffect(() => {
-    if (!trip.id || !selectedDayId) return;
+    if (!trip.id || !selectedDayId || !days.length) return;
 
-    const eventsRef = collection(db, `trips/${trip.id}/days/${selectedDayId}/events`);
-    const q = query(eventsRef, orderBy('startTime', 'asc'));
+    const currentDay = days.find(d => d.id === selectedDayId);
+    if (!currentDay) return;
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const eventsRef = collection(db, `trips/${trip.id}/events`);
+
+    const unsubscribe = onSnapshot(eventsRef, (snapshot) => {
       const list: ItineraryEvent[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
         if (data.coordinates && typeof data.coordinates.lat === 'number' && typeof data.coordinates.lng === 'number') {
-          list.push({ id: doc.id, ...data } as ItineraryEvent);
+          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
+          if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
+            list.push({ id: doc.id, ...data } as ItineraryEvent);
+          }
         }
       });
-      // Sort chronologically by start time
-      list.sort((a, b) => a.startTime.localeCompare(b.startTime));
+      // Sort chronologically by startDateTime
+      list.sort((a, b) => a.startDateTime.localeCompare(b.startDateTime));
       setDayEvents(list);
     }, (err) => {
       console.error("Error fetching map coordinates:", err);
     });
 
     return () => unsubscribe();
-  }, [trip.id, selectedDayId]);
+  }, [trip.id, selectedDayId, days]);
 
   // Extract lat/lng array for bounds calculations
   const coordinates: [number, number][] = dayEvents.map(e => [e.coordinates!.lat, e.coordinates!.lng]);
@@ -178,9 +185,19 @@ export default function LeafletMap({ trip, selectedDayId }: LeafletMapProps) {
                   </span>
                   <h4 className="font-display font-bold text-xs text-slate-900 mt-1 leading-tight">{event.title}</h4>
                   <p className="text-[10px] text-slate-500 mt-0.5">{event.locationName}</p>
-                  <p className="text-[10px] font-mono text-slate-400 mt-1 flex items-center gap-1">
-                    <span>🕒 {event.startTime} &mdash; {event.endTime}</span>
-                  </p>
+                  {(() => {
+                    const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
+                    const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
+                    const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');
+                    const timeStr = isSpanning 
+                      ? `${startLocal.toFormat('MMM dd, HH:mm')} → ${endLocal.toFormat('MMM dd, HH:mm')}`
+                      : `${startLocal.toFormat('HH:mm')} — ${endLocal.toFormat('HH:mm')}`;
+                    return (
+                      <p className="text-[10px] font-mono text-slate-400 mt-1 flex items-center gap-1">
+                        <span>🕒 {timeStr}</span>
+                      </p>
+                    );
+                  })()}
                   {event.notes && (
                     <p className="text-[10px] italic text-slate-400 mt-1 border-t border-slate-100 pt-1 leading-normal">
                       "{event.notes.length > 50 ? event.notes.slice(0, 50) + '...' : event.notes}"

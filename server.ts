@@ -116,8 +116,8 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
       properties: {
         title: { type: Type.STRING, description: "A suggested trip title (e.g. 'Denver Wedding Trip')" },
         destination: { type: Type.STRING, description: "Suggested destination city and state/country" },
-        startDate: { type: Type.STRING, description: "Suggested start date of the trip in YYYY-MM-DD format, padded 2-3 days before the anchor event" },
-        endDate: { type: Type.STRING, description: "Suggested end date of the trip in YYYY-MM-DD format, padded 2-3 days after the anchor event" },
+        startDate: { type: Type.STRING, description: "Suggested start date of the trip in YYYY-MM-DD format. If the user specifies explicit travel/booking dates, use those exact dates as-is with no padding/buffer days. Only pad/add buffer days around the anchor event when the anchor is vague and real travel dates aren't specified." },
+        endDate: { type: Type.STRING, description: "Suggested end date of the trip in YYYY-MM-DD format. If the user specifies explicit travel/booking dates, use those exact dates as-is with no padding/buffer days. Only pad/add buffer days around the anchor event when the anchor is vague and real travel dates aren't specified." },
         anchorEvent: {
           type: Type.OBJECT,
           description: "Details of the fixed/booked anchor event itself",
@@ -140,9 +140,12 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
       required: ["title", "destination", "startDate", "endDate", "anchorEvent"]
     };
 
-    const prompt = `You are an expert travel assistant. Analyze the user text below describing a fixed anchor event (like a wedding, concert, reservation) and extract the trip title, destination, suggested padded date range, and the details of the anchor event. 
+    const prompt = `You are an expert travel assistant. Analyze the user text below describing a fixed anchor event (like a wedding, concert, reservation) and extract the trip title, destination, suggested date range, and the details of the anchor event. 
 The current date is July 9, 2026. Use this to resolve relative date descriptions like 'next month', 'third week of September', 'this weekend', etc.
-Make sure you pad the overall trip startDate/endDate with 2-3 buffer days around the anchor event date. If the user mentions multiple days or a stay, cover those days and add buffer days.
+
+IMPORTANT DATE RULES:
+1. If the user specifies explicit travel dates (e.g., specific flight confirmation dates, explicit check-in/check-out hotel dates, or clear travel dates like 'Jul 29-30' or 'August 1 to August 5'), do NOT add any padding or buffer days. Set startDate and endDate to those exact dates.
+2. Only add 2-3 buffer days before and after the anchor event if the anchor is vague (e.g. 'the third week of September', or a single day mentioned with no indication of trip length or duration) and real travel dates are not otherwise specified.
 
 User Text: "${anchorText}"`;
 
@@ -333,23 +336,20 @@ app.post('/api/copilot/action', async (req, res) => {
     const { action, currentEvents, tripDetails } = req.body;
     const ai = getGeminiClient();
 
-    let systemInstruction = "You are an elite travel concierge. Suggest realistic, high-value improvements to the user's specific itinerary. Keep your response brief, scannable, and formatted in clear markdown.";
+    let systemInstruction = "You are an elite travel concierge. Output your response EXACTLY as a JSON object matching this schema:\n\n{ \"advice\": \"Markdown text describing your rationale/response.\", \"proposedChanges\": [ { \"type\": \"update\" | \"add\" | \"delete\", \"eventId\": \"optional id of the existing event to modify/delete\", \"event\": { \"title\": \"...\", \"category\": \"activity|food|stay|travel|logistics\", \"startTime\": \"HH:mm\", \"endTime\": \"HH:mm\", \"locationName\": \"...\", \"notes\": \"...\" } } ] }\n\nOnly include 'proposedChanges' if your action naturally results in altering the itinerary (like replanning, reordering, or adding dog-friendly spots). For pure advice (like connection-checks), leave proposedChanges empty.";
     let prompt = '';
 
     if (action === 'reorder') {
-      prompt = `Review the current list of travel stops for this day: ${JSON.stringify(currentEvents)}. Reorder them so that driving or transit distance is minimized, avoiding zig-zagging back and forth across the area. Highlight the proposed new order with time slots, why this order makes physical sense, and travel tips.`;
+      prompt = `Review the current list of travel stops for this day: ${JSON.stringify(currentEvents)}. Reorder them so that driving or transit distance is minimized, avoiding zig-zagging back and forth across the area. Return 'update' changes with the new start/end times and order.`;
     } else if (action === 'connection-check') {
-      prompt = `Review this itinerary day: ${JSON.stringify(currentEvents)}. Flag any tight connections (less than 30 mins between activities), unrealistic driving times, overlapping bookings, or missed logistics. Format as a clean safety checklist.`;
+      prompt = `Review this itinerary day: ${JSON.stringify(currentEvents)}. Flag any tight connections (less than 30 mins between activities), unrealistic driving times, overlapping bookings, or missed logistics. Return purely 'advice' as a checklist.`;
     } else if (action === 'dog-friendly') {
-      prompt = `Review this day's itinerary: ${JSON.stringify(currentEvents)}. Recommend 2 nearby dog-friendly activities, parks, or café patios near these stops in ${tripDetails?.destination || 'the area'}. Give clear directions and dog policies.`;
+      prompt = `Review this day's itinerary: ${JSON.stringify(currentEvents)}. Recommend 2 nearby dog-friendly activities, parks, or café patios near these stops in ${tripDetails?.destination || 'the area'}. Give clear directions and dog policies. Add these as 'add' changes.`;
     } else {
       // Replan day
-      prompt = `Create a completely fresh alternative full-day itinerary for this day in ${tripDetails?.destination || 'the destination'}. Original stops were: ${JSON.stringify(currentEvents)}. Provide 4 new, unique local experiences, dining, or secret viewpoints with proposed times and clear notes.`;
+      prompt = `Create a completely fresh alternative full-day itinerary for this day in ${tripDetails?.destination || 'the destination'}. Original stops were: ${JSON.stringify(currentEvents)}. Return 'delete' changes for existing items you want to remove, and 'add' changes for the 4 new unique local experiences, dining, or secret viewpoints with proposed times.`;
     }
 
-    // Since this is a conversational assistant action, we select the correct tier:
-    // "a Flash-Lite–class model handles lightweight, frequent asks (tagging, short rewrites, single-stop suggestions); a Flash-class model is reserved for less frequent, more complex asks (full-day replans)."
-    // Let's use gemini-3.5-flash for replans and gemini-3.5-flash (or we can use it for all, since it is exceptionally fast and free).
     const modelToUse = 'gemini-3.5-flash';
 
     const response = await generateContentWithRetry(ai, {
@@ -358,10 +358,16 @@ app.post('/api/copilot/action', async (req, res) => {
       config: {
         systemInstruction: systemInstruction,
         temperature: 0.7,
+        responseMimeType: "application/json",
       }
     });
 
-    res.json({ success: true, advice: response.text || 'No advice generated.' });
+    try {
+      const parsed = JSON.parse(response.text || '{}');
+      res.json({ success: true, advice: parsed.advice || 'No advice generated.', proposedChanges: parsed.proposedChanges || [] });
+    } catch (e) {
+      res.json({ success: true, advice: response.text || 'No advice generated.', proposedChanges: [] });
+    }
   } catch (error: any) {
     console.error('Copilot Action AI Error:', error);
     res.status(500).json({ success: false, error: error.message || 'AI Copilot Action Failed' });

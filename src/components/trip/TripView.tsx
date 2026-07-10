@@ -5,16 +5,69 @@
 
 import React, { useState, useEffect } from 'react';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
-import { doc, onSnapshot, updateDoc, collection, query, getDocs, addDoc } from 'firebase/firestore';
+import { doc, onSnapshot, updateDoc, collection, query, getDocs, addDoc, deleteDoc } from 'firebase/firestore';
 import { Trip, Day, UserSession, CollaboratorRole, TripType, TripStatus } from '../../types';
 import ItineraryTimeline from '../timeline/ItineraryTimeline';
 import LeafletMap from '../map/LeafletMap';
 import CopilotPanel from '../copilot/CopilotPanel';
 import { 
   ArrowLeft, Users, Calendar, MapPin, Share2, Plus, Check, Settings, 
-  Map as MapIcon, Calendar as CalendarIcon, Sparkles, Dog, ShieldAlert 
+  Map as MapIcon, Calendar as CalendarIcon, Sparkles, Dog, ShieldAlert, Smile, Trash2, Plane
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { DateTime } from 'luxon';
+
+const migrateTripEvents = async (tripId: string, currentSchemaVersion: number) => {
+  if (currentSchemaVersion >= 2) return;
+  console.log(`Migrating trip ${tripId} from schema version ${currentSchemaVersion} to 2`);
+
+  try {
+    const daysRef = collection(db, `trips/${tripId}/days`);
+    const daysSnap = await getDocs(daysRef);
+    const daysList = daysSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as Day);
+
+    const newEventsCollRef = collection(db, `trips/${tripId}/events`);
+
+    for (const day of daysList) {
+      const oldEventsRef = collection(db, `trips/${tripId}/days/${day.id}/events`);
+      const oldEventsSnap = await getDocs(oldEventsRef);
+
+      for (const eventDoc of oldEventsSnap.docs) {
+        const eventData = eventDoc.data();
+        const timezone = eventData.timezone || 'America/New_York';
+        const startTime = eventData.startTime || '09:00';
+        const endTime = eventData.endTime || '10:00';
+
+        const startLocal = DateTime.fromFormat(`${day.dateStr} ${startTime}`, 'yyyy-MM-dd HH:mm', { zone: timezone });
+        const endLocal = DateTime.fromFormat(`${day.dateStr} ${endTime}`, 'yyyy-MM-dd HH:mm', { zone: timezone });
+
+        let finalEndLocal = endLocal;
+        if (endLocal < startLocal) {
+          finalEndLocal = endLocal.plus({ days: 1 });
+        }
+
+        const startDateTime = startLocal.toISO() || new Date(`${day.dateStr}T${startTime}:00`).toISOString();
+        const endDateTime = finalEndLocal.toISO() || new Date(`${day.dateStr}T${endTime}:00`).toISOString();
+
+        const { startTime: _, endTime: __, ...rest } = eventData;
+        await addDoc(newEventsCollRef, {
+          ...rest,
+          startDateTime,
+          endDateTime,
+          timezone,
+        });
+
+        await deleteDoc(doc(db, `trips/${tripId}/days/${day.id}/events`, eventDoc.id));
+      }
+    }
+
+    const tripDocRef = doc(db, 'trips', tripId);
+    await updateDoc(tripDocRef, { schemaVersion: 2 });
+    console.log(`Successfully migrated trip ${tripId} to schema version 2`);
+  } catch (err) {
+    console.error("Failed to migrate trip events:", err);
+  }
+};
 
 interface TripViewProps {
   tripId: string;
@@ -33,6 +86,25 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<CollaboratorRole>('editor');
 
+  // Travelers state
+  const [isTravelerOpen, setIsTravelerOpen] = useState(false);
+  const [travelerName, setTravelerName] = useState('');
+  const [travelerColor, setTravelerColor] = useState('bg-indigo-500');
+  const [travelerEmail, setTravelerEmail] = useState('');
+
+  const TRAVELER_COLORS = [
+    { name: 'Indigo', class: 'bg-indigo-500' },
+    { name: 'Red', class: 'bg-red-500' },
+    { name: 'Orange', class: 'bg-orange-500' },
+    { name: 'Amber', class: 'bg-amber-500' },
+    { name: 'Emerald', class: 'bg-emerald-500' },
+    { name: 'Teal', class: 'bg-teal-500' },
+    { name: 'Blue', class: 'bg-blue-500' },
+    { name: 'Purple', class: 'bg-purple-500' },
+    { name: 'Pink', class: 'bg-pink-500' },
+    { name: 'Slate', class: 'bg-slate-500' },
+  ];
+
   // Mobile navigation tabs
   const [mobileTab, setMobileTab] = useState<'timeline' | 'map' | 'copilot'>('timeline');
 
@@ -47,6 +119,8 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
   const [editCoverColor, setEditCoverColor] = useState('bg-blue-50 border-blue-100 text-blue-700');
   const [editStatus, setEditStatus] = useState<TripStatus>('planning');
   const [editStatusOverride, setEditStatusOverride] = useState(false);
+  const [showOrphanedBanner, setShowOrphanedBanner] = useState(false);
+
 
   useEffect(() => {
     if (trip && isEditOpen) {
@@ -151,6 +225,29 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
         const daysRef = collection(db, `trips/${trip.id}/days`);
         const daysSnap = await getDocs(daysRef);
         
+        // Check for orphaned events
+        const eventsRef = collection(db, `trips/${trip.id}/events`);
+        const eventsSnap = await getDocs(eventsRef);
+        let hasOrphaned = false;
+        
+        // Parse dates carefully considering timezones might be tricky, but basic ISO comparison works for days
+        const newStartStr = editStartDate + "T00:00:00";
+        const newEndStr = editEndDate + "T23:59:59";
+        
+        eventsSnap.forEach(docSnap => {
+          const ev = docSnap.data();
+          const evStart = ev.startDateTime;
+          if (evStart < newStartStr || evStart > newEndStr) {
+             hasOrphaned = true;
+          }
+        });
+        
+        if (hasOrphaned) {
+          setShowOrphanedBanner(true);
+        } else {
+          setShowOrphanedBanner(false);
+        }
+
         if (daysSnap.empty) {
           const start = new Date(editStartDate);
           const end = new Date(editEndDate);
@@ -183,7 +280,12 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
     const docRef = doc(db, 'trips', tripId);
     const unsubscribe = onSnapshot(docRef, (snapshot) => {
       if (snapshot.exists()) {
-        setTrip({ id: snapshot.id, ...snapshot.data() } as Trip);
+        const tripData = { id: snapshot.id, ...snapshot.data() } as Trip;
+        setTrip(tripData);
+
+        if (!tripData.schemaVersion || tripData.schemaVersion < 2) {
+          migrateTripEvents(snapshot.id, tripData.schemaVersion || 1);
+        }
       } else {
         alert("Trip has been deleted or is inaccessible.");
         onBackToHub();
@@ -270,6 +372,69 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
     }
   };
 
+  // Traveler management handlers
+  const handleAddTraveler = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!trip) return;
+    if (userRole === 'viewer') {
+      alert("Only owners or editors can add travelers.");
+      return;
+    }
+    if (!travelerName.trim()) return;
+
+    try {
+      const newTraveler: any = {
+        id: `trv-${Math.random().toString(36).substr(2, 9)}`,
+        name: travelerName.trim(),
+        color: travelerColor,
+      };
+      
+      if (travelerEmail.trim()) {
+        newTraveler.email = travelerEmail.trim().toLowerCase();
+      }
+
+      const updatedTravelers = [...(trip.travelers || []), newTraveler];
+
+      const docRef = doc(db, 'trips', trip.id);
+      await updateDoc(docRef, {
+        travelers: updatedTravelers,
+      });
+
+      setTravelerName('');
+      setTravelerEmail('');
+      // set color to a random default color
+      const nextColor = TRAVELER_COLORS[Math.floor(Math.random() * TRAVELER_COLORS.length)].class;
+      setTravelerColor(nextColor);
+    } catch (err: any) {
+      console.error("Error adding traveler:", err);
+      alert("Failed to add traveler.");
+    }
+  };
+
+  const handleRemoveTraveler = async (travelerId: string) => {
+    if (!trip) return;
+    if (userRole === 'viewer') {
+      alert("Only owners or editors can remove travelers.");
+      return;
+    }
+
+    if (!confirm("Are you sure you want to remove this traveler? They will be removed from this list, but their past assignments remain.")) {
+      return;
+    }
+
+    try {
+      const updatedTravelers = (trip.travelers || []).filter(t => t.id !== travelerId);
+
+      const docRef = doc(db, 'trips', trip.id);
+      await updateDoc(docRef, {
+        travelers: updatedTravelers,
+      });
+    } catch (err: any) {
+      console.error("Error removing traveler:", err);
+      alert("Failed to remove traveler.");
+    }
+  };
+
   if (loading || !trip) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
@@ -297,6 +462,15 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
               <h2 className="font-display font-bold text-lg text-slate-900 truncate leading-snug">
                 {trip.title}
               </h2>
+              {userRole !== 'viewer' && (
+                <button 
+                  onClick={() => setIsEditOpen(true)}
+                  className="p-1 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition shrink-0"
+                  title="Trip Settings"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
+              )}
               {trip.petFriendly && (
                 <div className="h-5 w-5 rounded bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
                   <Dog className="h-3 w-3" />
@@ -325,17 +499,17 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Edit Trip Settings Button */}
-          {userRole !== 'viewer' && (
-            <button 
-              onClick={() => setIsEditOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 text-slate-600 text-xs font-bold transition shadow-sm"
-              id="edit-trip-btn"
-            >
-              <Settings className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Edit Trip</span>
-            </button>
-          )}
+
+
+          {/* Travelers Button */}
+          <button 
+            onClick={() => setIsTravelerOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 text-slate-600 text-xs font-bold transition shadow-sm"
+            id="travelers-btn"
+          >
+            <Smile className="h-3.5 w-3.5 text-indigo-500" />
+            <span>Travelers</span>
+          </button>
 
           {/* Collaborator Sharing Button */}
           <button 
@@ -347,6 +521,17 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
           </button>
         </div>
       </header>
+      {showOrphanedBanner && (
+        <div className="bg-amber-50 border-b border-amber-100 px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-amber-800 text-xs">
+            <ShieldAlert className="h-4 w-4" />
+            <span><b>Review needed:</b> You shrunk the trip dates, leaving some existing events outside the new range. They are preserved, but won't show on the timeline.</span>
+          </div>
+          <button onClick={() => setShowOrphanedBanner(false)} className="text-amber-800 hover:text-amber-900">
+            &times;
+          </button>
+        </div>
+      )}
 
       {/* Main Split-Pane Layout */}
       <div className="flex-1 overflow-hidden relative flex flex-col" id="split-pane">
@@ -369,6 +554,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
             <LeafletMap 
               trip={trip}
               selectedDayId={selectedDayId}
+              days={days}
             />
           </div>
 
@@ -392,13 +578,14 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                 selectedDayId={selectedDayId}
                 days={days}
                 onSelectDay={setSelectedDayId}
-                userRole="viewer" // Forces read-only single column fallback on mobile!
+                userRole={userRole}
               />
             )}
             {mobileTab === 'map' && (
               <LeafletMap 
                 trip={trip}
                 selectedDayId={selectedDayId}
+                days={days}
               />
             )}
             {mobileTab === 'copilot' && (
@@ -471,22 +658,14 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
               <div className="flex flex-col gap-2 max-h-[160px] overflow-y-auto pr-1">
                 <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Collaborators List</div>
                 
-                {/* Creator / Owner info */}
-                <div className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2.5 rounded-xl text-xs">
-                  <div className="flex flex-col">
-                    <span className="font-bold text-slate-700 truncate max-w-[200px]">{user.email || 'Anonymous'}</span>
-                    <span className="text-[10px] text-slate-400">Creator</span>
-                  </div>
-                  <span className="px-2 py-0.5 bg-slate-200 text-slate-700 text-[9px] font-bold uppercase rounded font-mono">
-                    Owner
-                  </span>
-                </div>
-
-                {/* Additional collaborators */}
+                {/* All collaborators */}
                 {Object.entries(trip.collaborators || {}).map(([email, role]) => (
                   <div key={email} className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2.5 rounded-xl text-xs">
-                    <span className="font-bold text-slate-700 truncate max-w-[200px]">{email}</span>
-                    <span className="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-[9px] font-bold uppercase rounded font-mono">
+                    <div className="flex flex-col">
+                      <span className="font-bold text-slate-700 truncate max-w-[200px]">{email}</span>
+                      {role === 'owner' && <span className="text-[10px] text-slate-400">Creator</span>}
+                    </div>
+                    <span className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded font-mono ${role === 'owner' ? 'bg-slate-200 text-slate-700' : 'bg-indigo-50 text-indigo-700'}`}>
                       {role}
                     </span>
                   </div>
@@ -522,7 +701,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
 
                   <button
                     type="submit"
-                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition shadow-md shadow-indigo-100"
+                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition shadow-md shadow-indigo-100 font-sans"
                   >
                     Add Collaborator
                   </button>
@@ -531,6 +710,144 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                 <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100 text-[11px] text-slate-400 mt-2">
                   <ShieldAlert className="h-4.5 w-4.5 text-amber-500 shrink-0" />
                   <span>Viewers are not permitted to invite other collaborators.</span>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* TRIP TRAVELERS PANEL MODAL */}
+      <AnimatePresence>
+        {isTravelerOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-md w-full border border-slate-100 p-6 shadow-xl flex flex-col gap-4 overflow-hidden"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="font-display font-bold text-base text-slate-900">Trip Travelers</h3>
+                  <p className="text-xs text-slate-400">Manage who is physically traveling on this trip.</p>
+                </div>
+                <button 
+                  onClick={() => setIsTravelerOpen(false)}
+                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition text-lg"
+                >
+                  &times;
+                </button>
+              </div>
+
+              {/* Travelers list display */}
+              <div className="flex flex-col gap-2 max-h-[220px] overflow-y-auto pr-1">
+                <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Travelers List</div>
+                
+                {(!trip.travelers || trip.travelers.length === 0) ? (
+                  <div className="text-center py-6 text-xs text-slate-400 italic">
+                    No travelers specified yet. Add travelers below to split itineraries.
+                  </div>
+                ) : (
+                  trip.travelers.map((traveler) => {
+                    const initials = traveler.name
+                      .split(' ')
+                      .map((n) => n[0])
+                      .join('')
+                      .toUpperCase()
+                      .slice(0, 2);
+                    return (
+                      <div key={traveler.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2.5 rounded-xl text-xs">
+                        <div className="flex items-center gap-2.5">
+                          <span className={`h-7 w-7 rounded-full ${traveler.color || 'bg-slate-500'} text-[10px] font-bold text-white flex items-center justify-center`}>
+                            {initials}
+                          </span>
+                          <div className="flex flex-col">
+                            <span className="font-bold text-slate-700">{traveler.name}</span>
+                            {traveler.email && (
+                              <span className="text-[10px] text-slate-400 font-mono">Linked: {traveler.email}</span>
+                            )}
+                          </div>
+                        </div>
+                        {userRole !== 'viewer' && (
+                          <button
+                            onClick={() => handleRemoveTraveler(traveler.id)}
+                            className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition"
+                            title="Remove Traveler"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Add Traveler Form */}
+              {userRole !== 'viewer' ? (
+                <form onSubmit={handleAddTraveler} className="flex flex-col gap-3.5 border-t border-slate-100 pt-4">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Traveler's Name</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="e.g. John Doe, Emma (Kid)"
+                      value={travelerName}
+                      onChange={(e) => setTravelerName(e.target.value)}
+                      className="px-3 py-2 border border-slate-200 rounded-xl text-xs outline-none focus:border-indigo-500 transition"
+                    />
+                  </div>
+
+                  {/* Avatar Color Picker */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Avatar Color Accent</label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {TRAVELER_COLORS.map((col) => (
+                        <button
+                          type="button"
+                          key={col.class}
+                          onClick={() => setTravelerColor(col.class)}
+                          className={`h-5 w-5 rounded-full ${col.class} transition flex items-center justify-center ${
+                            travelerColor === col.class ? 'ring-2 ring-indigo-500 ring-offset-1 scale-110 shadow-sm' : 'hover:scale-105'
+                          }`}
+                          title={col.name}
+                        >
+                          {travelerColor === col.class && <Check className="h-3 w-3 text-white" />}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Optional Linked Collaborator Email */}
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Linked Collaborator (Optional)</label>
+                    <select
+                      value={travelerEmail}
+                      onChange={(e) => setTravelerEmail(e.target.value)}
+                      className="px-3 py-2 border border-slate-200 rounded-xl text-xs outline-none focus:border-indigo-500 bg-white transition"
+                    >
+                      <option value="">-- Unlinked / No account (e.g. kids) --</option>
+                      {Array.from(new Set([...(user.email ? [user.email] : []), ...Object.keys(trip.collaborators || {})])).map((email) => (
+                        <option key={email} value={email}>
+                          {email}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition shadow-md shadow-indigo-100 flex items-center justify-center gap-1.5 font-sans"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add Traveler</span>
+                  </button>
+                </form>
+              ) : (
+                <div className="flex items-center gap-2 p-3 bg-slate-50 rounded-xl border border-slate-100 text-[11px] text-slate-400 mt-2">
+                  <ShieldAlert className="h-4.5 w-4.5 text-amber-500 shrink-0" />
+                  <span>Viewers are not permitted to manage travelers.</span>
                 </div>
               )}
             </motion.div>
@@ -716,3 +1033,4 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
     </div>
   );
 }
+
