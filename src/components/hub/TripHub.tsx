@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
+import { inferTimezone } from '../../utils/timezone';
 
 interface TripHubProps {
   user: UserSession;
@@ -216,7 +217,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
               address.includes(searchLower) ||
               resNum.includes(searchLower)
             ) {
-              const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || 'America/New_York');
+              const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || inferTimezone(trip.destination));
               const dayStr = startLocal.isValid ? startLocal.toFormat('MMM dd') : 'Event';
 
               matches.push({
@@ -285,29 +286,6 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
       } catch (err) {
         handleFirestoreError(err, OperationType.CREATE, 'trips');
         throw err;
-      }
-
-      // Initialize the days structure
-      const start = new Date(newStartDate);
-      const end = new Date(newEndDate);
-      const dayDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-
-      const daysRef = collection(db, `trips/${docRef.id}/days`);
-      for (let i = 0; i < dayDiff; i++) {
-        const currentDate = new Date(start);
-        currentDate.setDate(start.getDate() + i);
-        const dateStr = currentDate.toISOString().split('T')[0];
-        
-        try {
-          await addDoc(daysRef, {
-            id: `day-${i + 1}`,
-            dateStr,
-            title: `Day ${i + 1}`,
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/days`);
-          throw err;
-        }
       }
 
       setIsCreateOpen(false);
@@ -424,7 +402,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         },
         collaboratorEmails: userEmail ? [userEmail] : [],
         collaboratorUids: [user.uid],
-        schemaVersion: 1,
+        schemaVersion: 2,
         createdAt: new Date().toISOString(),
       };
 
@@ -436,42 +414,13 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         throw err;
       }
 
-      // Initialize the days structure
-      const start = new Date(confirmedStartDate);
-      const end = new Date(confirmedEndDate);
-      const dayDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
-
-      const daysRef = collection(db, `trips/${docRef.id}/days`);
-      let anchorDayDocId = '';
-      let firstDayDocId = '';
-
-      for (let i = 0; i < dayDiff; i++) {
-        const currentDate = new Date(start);
-        currentDate.setDate(start.getDate() + i);
-        const dateStr = currentDate.toISOString().split('T')[0];
-        
-        try {
-          const dayDocRef = await addDoc(daysRef, {
-            id: `day-${i + 1}`,
-            dateStr,
-            title: `Day ${i + 1}`,
-          });
-
-          if (i === 0) firstDayDocId = dayDocRef.id;
-          if (dateStr === confirmedEventDate) {
-            anchorDayDocId = dayDocRef.id;
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/days`);
-          throw err;
-        }
-      }
-
       // Insert anchor event flat in trips/{tripId}/events
       const eventsCollRef = collection(db, `trips/${docRef.id}/events`);
       
-      const startLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventStartTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
-      const endLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventEndTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+      const anchorTimezone = extractedData?.anchorEvent?.timezone || inferTimezone(confirmedEventLocation || confirmedEventAddress || confirmedDestination);
+      
+      const startLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventStartTime}`, 'yyyy-MM-dd HH:mm', { zone: anchorTimezone });
+      const endLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventEndTime}`, 'yyyy-MM-dd HH:mm', { zone: anchorTimezone });
       
       let finalEndLocal = endLocal;
       if (endLocal < startLocal) {
@@ -483,7 +432,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
         category: confirmedEventCategory,
         startDateTime: startLocal.toISO(),
         endDateTime: finalEndLocal.toISO(),
-        timezone: 'America/New_York',
+        timezone: anchorTimezone,
         locationName: confirmedEventLocation,
         address: confirmedEventAddress || '',
         notes: confirmedEventNotes || '',
@@ -600,32 +549,6 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
       } catch (err) {
         handleFirestoreError(err, OperationType.CREATE, 'trips');
         throw err;
-      }
-      
-      // Copy the days structure but NOT the events (as per spec: "copies structure, not dates or events")
-      const daysRef = collection(db, `trips/${trip.id}/days`);
-      let daysSnap;
-      try {
-        daysSnap = await getDocs(daysRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/days`);
-        throw err;
-      }
-
-      const newDaysRef = collection(db, `trips/${docRef.id}/days`);
-
-      for (const dayDoc of daysSnap.docs) {
-        const dayData = dayDoc.data();
-        try {
-          await addDoc(newDaysRef, {
-            id: dayData.id,
-            dateStr: dayData.dateStr,
-            title: dayData.title,
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/days`);
-          throw err;
-        }
       }
 
     } catch (e: any) {
@@ -1204,8 +1127,8 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
                             />
                           </div>
 
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Start Date (with buffer) *</label>
+                           <div className="flex flex-col gap-1">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Start Date *</label>
                             <input
                               type="date"
                               required
@@ -1216,7 +1139,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
                           </div>
 
                           <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">End Date (with buffer) *</label>
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">End Date *</label>
                             <input
                               type="date"
                               required

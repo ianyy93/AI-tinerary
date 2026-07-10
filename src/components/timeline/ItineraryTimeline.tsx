@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
+import { inferTimezone } from '../../utils/timezone';
 
 interface ItineraryTimelineProps {
   trip: Trip;
@@ -58,7 +59,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const [category, setCategory] = useState<EventCategory>('activity');
   const [startDateTimeLocal, setStartDateTimeLocal] = useState('');
   const [endDateTimeLocal, setEndDateTimeLocal] = useState('');
-  const [timezone, setTimezone] = useState('America/New_York');
+  const [timezone, setTimezone] = useState(() => inferTimezone(trip.destination));
   const [locationName, setLocationName] = useState('');
   const [address, setAddress] = useState('');
   const [lat, setLat] = useState('');
@@ -72,15 +73,19 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const [filterTravelerId, setFilterTravelerId] = useState<string>('everyone');
   const [eventTravelerIds, setEventTravelerIds] = useState<string[]>([]);
 
-  // Detect user timezone to pre-populate
+  // Detect user timezone to pre-populate or fallback to trip destination timezone
   useEffect(() => {
     try {
       const detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (detectedTz) setTimezone(detectedTz);
+      if (detectedTz) {
+        setTimezone(detectedTz);
+      } else {
+        setTimezone(inferTimezone(trip.destination));
+      }
     } catch (e) {
-      // Ignore
+      setTimezone(inferTimezone(trip.destination));
     }
-  }, []);
+  }, [trip.destination]);
 
   // Sync / listen to events for the selected day from the flat collection
   useEffect(() => {
@@ -95,7 +100,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
       const items: ItineraryEvent[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
+        const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
         if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
           items.push({ id: doc.id, ...data } as ItineraryEvent);
         }
@@ -142,12 +147,13 @@ const [isModalOpen, setIsModalOpen] = useState(false);
     setTitle(event.title || '');
     setCategory(event.category || 'activity');
 
-    const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || 'America/New_York');
-    const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone || 'America/New_York');
+    const tzFallback = inferTimezone(trip.destination);
+    const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone || tzFallback);
+    const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone || tzFallback);
     setStartDateTimeLocal(startLocal.isValid ? startLocal.toFormat("yyyy-MM-dd'T'HH:mm") : '');
     setEndDateTimeLocal(endLocal.isValid ? endLocal.toFormat("yyyy-MM-dd'T'HH:mm") : '');
 
-    setTimezone(event.timezone || 'America/New_York');
+    setTimezone(event.timezone || tzFallback);
     setLocationName(event.locationName || '');
     setAddress(event.address || '');
     setLat(event.coordinates?.lat?.toString() || '');
@@ -465,10 +471,22 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                             <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
                               {cat.label}
                             </span>
-                            {event.source && event.source !== 'manual' && (
-                              <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-100 flex items-center gap-1" title="Unverified Generated Entry">
+                            {(event.source === 'anchor' || event.isAnchor) && (
+                              <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-blue-100 flex items-center gap-1" title="Fixed/Booked Anchor Event">
+                                <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                                Anchor
+                              </span>
+                            )}
+                            {event.source === 'wizard' && (
+                              <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-100 flex items-center gap-1" title="Wizard Suggested Entry">
                                 <Sparkles className="h-2.5 w-2.5" />
-                                {event.source === 'wizard' ? 'Wizard' : event.source === 'ai-suggested' ? 'AI Suggestion' : 'Anchor'}
+                                Wizard
+                              </span>
+                            )}
+                            {event.source === 'ai-suggested' && (
+                              <span className="bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-purple-100 flex items-center gap-1" title="AI Copilot Suggested Entry">
+                                <Sparkles className="h-2.5 w-2.5" />
+                                AI Suggestion
                               </span>
                             )}
                             {event.dogFriendly && (

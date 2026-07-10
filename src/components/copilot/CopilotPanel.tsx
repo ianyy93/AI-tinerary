@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db, handleFirestoreError, OperationType } from '../../firebase';
-import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot } from 'firebase/firestore';
 import { Trip, ItineraryEvent, Day } from '../../types';
 import { 
   Trash2, Sparkles, ShieldCheck, Check, RotateCcw, AlertTriangle, HelpCircle, 
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
+import { inferTimezone } from '../../utils/timezone';
 
 interface CopilotPanelProps {
   trip: Trip;
@@ -49,6 +50,9 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
   const [actionResponse, setActionResponse] = useState<string>('');
   const [actionError, setActionError] = useState('');
   const [proposedChanges, setProposedChanges] = useState<any[]>([]);
+  const [events, setEvents] = useState<any[]>([]);
+  const [isCached, setIsCached] = useState(false);
+  const debounceTimers = useRef<Record<string, any>>({});
 
 
   // Daily Usage Tracking
@@ -80,6 +84,86 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
   // Check quota limit
   const isQuotaReached = aiUsageCount >= MAX_DAILY_CALLS;
+
+  // Listen to events in real-time
+  useEffect(() => {
+    if (!trip.id) return;
+    const eventsRef = collection(db, `trips/${trip.id}/events`);
+    const unsubscribe = onSnapshot(eventsRef, (snapshot) => {
+      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setEvents(list);
+    }, (error) => {
+      console.error("Error listening to events in CopilotPanel:", error);
+    });
+    return () => unsubscribe();
+  }, [trip.id]);
+
+  // Clean up debounce timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(debounceTimers.current).forEach(clearTimeout);
+    };
+  }, []);
+
+  const calculateInputSignature = (dayEvents: any[]) => {
+    const eventsSignature = JSON.stringify(
+      dayEvents.map(e => ({
+        id: e.id || '',
+        title: e.title || '',
+        category: e.category || '',
+        startDateTime: e.startDateTime || '',
+        endDateTime: e.endDateTime || '',
+        locationName: e.locationName || '',
+        address: e.address || '',
+        notes: e.notes || '',
+      })).sort((a, b) => (a.startDateTime || '').localeCompare(b.startDateTime || ''))
+    );
+    return JSON.stringify({
+      destination: trip.destination,
+      events: eventsSignature
+    });
+  };
+
+  // Load cached advice/proposedChanges if reopened with nothing changed since
+  useEffect(() => {
+    if (!selectedDayId || !trip.id) return;
+    const currentDay = days.find(d => d.id === selectedDayId);
+    if (!currentDay) return;
+
+    // Filter events for selectedDayId
+    const dayEvents = events.filter(data => {
+      const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
+      return startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr;
+    });
+
+    const currentSignature = calculateInputSignature(dayEvents);
+    const lastAction = localStorage.getItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`);
+
+    if (lastAction) {
+      const cacheKey = `aitinerary_cache_${trip.id}_${selectedDayId}_${lastAction}`;
+      const cacheStr = localStorage.getItem(cacheKey);
+      if (cacheStr) {
+        try {
+          const cache = JSON.parse(cacheStr);
+          if (cache.inputSignature === currentSignature) {
+            setActionResponse(cache.advice || '');
+            setProposedChanges(cache.proposedChanges || []);
+            setActionError('');
+            setIsCached(true);
+            return;
+          }
+        } catch (e) {
+          console.error("Error parsing cache:", e);
+        }
+      }
+    }
+
+    // Clear states if no valid cache matches
+    setActionResponse('');
+    setProposedChanges([]);
+    setActionError('');
+    setIsCached(false);
+  }, [selectedDayId, trip.id, events, trip.destination, days]);
 
   // 1. Generate current Wizard Step
   const handleGenerateStep = async (stepNum: number) => {
@@ -172,14 +256,15 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
         const staysColl = collection(db, `trips/${trip.id}/events`);
         for (const stay of wizardData.stays) {
           try {
-            const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
-            const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+            const stayTz = inferTimezone(stay.locationName || trip.destination);
+            const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+            const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
             await addDoc(staysColl, {
               title: `Check-in: ${stay.title}`,
               category: 'stay',
               startDateTime: startLocal.toISO(),
               endDateTime: endLocal.toISO(),
-              timezone: 'America/New_York',
+              timezone: stayTz,
               locationName: stay.locationName,
               address: stay.address,
               notes: stay.notes,
@@ -204,8 +289,9 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
             const itemStartTime = item.startTime || '10:00';
             const itemEndTime = item.endTime || '11:30';
 
-            const startLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemStartTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
-            const endLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemEndTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+            const itemTz = inferTimezone(item.locationName || item.title || trip.destination);
+            const startLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemStartTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
+            const endLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemEndTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
 
             let finalEndLocal = endLocal;
             if (endLocal < startLocal) {
@@ -218,7 +304,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                 category: category,
                 startDateTime: startLocal.toISO(),
                 endDateTime: finalEndLocal.toISO(),
-                timezone: 'America/New_York',
+                timezone: itemTz,
                 locationName: item.locationName,
                 address: item.address,
                 notes: item.notes,
@@ -271,10 +357,11 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       if (!currentDay) return;
       const eventsColl = collection(db, `trips/${trip.id}/events`);
       
+      const changeTz = inferTimezone(change.event?.locationName || change.event?.title || trip.destination);
       let startDateTime = '', endDateTime = '';
       if (change.event && change.event.startTime && change.event.endTime) {
-        const startLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.startTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
-        const endLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.endTime}`, 'yyyy-MM-dd HH:mm', { zone: 'America/New_York' });
+        const startLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.startTime}`, 'yyyy-MM-dd HH:mm', { zone: changeTz });
+        const endLocal = DateTime.fromFormat(`${currentDay.dateStr} ${change.event.endTime}`, 'yyyy-MM-dd HH:mm', { zone: changeTz });
         let finalEndLocal = endLocal;
         if (endLocal < startLocal) finalEndLocal = endLocal.plus({ days: 1 });
         startDateTime = startLocal.toISO();
@@ -287,7 +374,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           category: change.event.category || 'activity',
           startDateTime,
           endDateTime,
-          timezone: 'America/New_York',
+          timezone: changeTz,
           locationName: change.event.locationName || change.event.title,
           notes: change.event.notes || '',
           dogFriendly: trip.petFriendly,
@@ -299,6 +386,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           title: change.event.title,
           startDateTime,
           endDateTime,
+          timezone: changeTz,
           source: 'ai-suggested'
         });
       } else if (change.type === 'delete' && change.eventId) {
@@ -317,51 +405,94 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     setProposedChanges(prev => prev.filter((_, i) => i !== index));
   };
   // 4. Interactive Day-by-Day Copilot Actions
-  const handleCopilotAction = async (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
+  const handleCopilotAction = (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
     if (isQuotaReached) {
       alert("AI daily quota limit reached. Please come back tomorrow.");
       return;
     }
+
     setIsExecutingAction(true);
     setActionResponse('');
     setActionError('');
+    setIsCached(false);
 
+    // Debounce repeated rapid-fire requests from the same trigger
+    if (debounceTimers.current[action]) {
+      console.log(`Debouncing rapid-fire trigger for: ${action}`);
+      clearTimeout(debounceTimers.current[action]);
+    }
+
+    debounceTimers.current[action] = setTimeout(() => {
+      executeCopilotAction(action);
+    }, 400);
+  };
+
+  const executeCopilotAction = async (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
     try {
-      // Fetch current day events to pass to Gemini
       const currentDay = days.find(d => d.id === selectedDayId);
       if (!currentDay) {
         throw new Error("No active day selected.");
       }
 
-      const eventsRef = collection(db, `trips/${trip.id}/events`);
-      let eventsSnap;
-      try {
-        eventsSnap = await getDocs(eventsRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/events`);
-        throw err;
-      }
-      const currentEvents = eventsSnap.docs
-        .map(doc => doc.data())
-        .filter(data => {
-          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
-          return startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr;
-        });
+      // Filter events for selectedDayId using state instead of raw fetch
+      const dayEvents = events.filter(data => {
+        const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
+        return startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr;
+      });
 
+      const currentSignature = calculateInputSignature(dayEvents);
+      const cacheKey = `aitinerary_cache_${trip.id}_${selectedDayId}_${action}`;
+
+      // Check Cache FIRST: skip API call if nothing has changed
+      const cacheStr = localStorage.getItem(cacheKey);
+      if (cacheStr) {
+        try {
+          const cache = JSON.parse(cacheStr);
+          if (cache.inputSignature === currentSignature) {
+            console.log(`Cache HIT for action: ${action} on day: ${selectedDayId}`);
+            setActionResponse(cache.advice || '');
+            setProposedChanges(cache.proposedChanges || []);
+            setIsCached(true);
+            setIsExecutingAction(false);
+            // Save last active action for restoration on reload/reopen
+            localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
+            return;
+          }
+        } catch (e) {
+          console.error("Cache parsing error:", e);
+        }
+      }
+
+      // Cache MISS: call API
+      console.log(`Cache MISS for action: ${action}. Making live API call...`);
       const response = await fetch('/api/copilot/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          currentEvents,
+          currentEvents: dayEvents,
           tripDetails: { destination: trip.destination },
         }),
       });
 
       const res = await response.json();
       if (res.success) {
-        setActionResponse(res.advice);
-        setProposedChanges(res.proposedChanges || []);
+        const advice = res.advice || 'No advice generated.';
+        const changes = res.proposedChanges || [];
+
+        setActionResponse(advice);
+        setProposedChanges(changes);
+        setIsCached(false);
+
+        // Store in cache
+        const cacheData = {
+          inputSignature: currentSignature,
+          advice,
+          proposedChanges: changes,
+        };
+        localStorage.setItem(cacheKey, JSON.stringify(cacheData));
+        localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
+
         incrementAiUsage();
       } else {
         setActionError(res.error || 'Failed to execute Copilot suggestion.');
@@ -576,7 +707,14 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           {/* COPILOT ADVICE / RESPONSE BOX */}
           <div className="flex-1 min-h-[160px] bg-slate-950 border border-slate-800/80 rounded-xl p-3 flex flex-col">
             <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
-              <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider font-bold">Copilot Log Output</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] font-mono text-slate-400 uppercase tracking-wider font-bold">Copilot Log Output</span>
+                {isCached && (
+                  <span className="text-[9px] font-mono bg-indigo-950 text-indigo-400 px-1.5 py-0.5 rounded font-bold uppercase border border-indigo-900/60">
+                    Cached
+                  </span>
+                )}
+              </div>
               <div className="h-1.5 w-1.5 rounded-full bg-indigo-500 animate-ping" />
             </div>
 

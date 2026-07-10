@@ -11,6 +11,7 @@ import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { Trip, ItineraryEvent, EventCategory, Day } from '../../types';
 import { MapPin, Navigation, Map as MapIcon, Layers } from 'lucide-react';
 import { DateTime } from 'luxon';
+import { inferTimezone } from '../../utils/timezone';
 
 interface LeafletMapProps {
   trip: Trip;
@@ -53,7 +54,7 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
       snapshot.forEach((doc) => {
         const data = doc.data();
         if (data.coordinates && typeof data.coordinates.lat === 'number' && typeof data.coordinates.lng === 'number') {
-          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || 'America/New_York');
+          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
           if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
             list.push({ id: doc.id, ...data } as ItineraryEvent);
           }

@@ -15,20 +15,29 @@ service cloud.firestore {
       );
     }
 
+    // Helper to check if user has write access (owner or editor)
+    function isTripOwnerOrEditor(tripData) {
+      return isSignedIn() && (
+        tripData.userId == request.auth.uid ||
+        tripData.get('collaborators', {}).get(request.auth.uid, 'viewer') == 'owner' ||
+        tripData.get('collaborators', {}).get(request.auth.uid, 'viewer') == 'editor' ||
+        (request.auth.token.email != null && (
+          tripData.get('collaborators', {}).get(request.auth.token.email, 'viewer') == 'owner' ||
+          tripData.get('collaborators', {}).get(request.auth.token.email, 'viewer') == 'editor'
+        ))
+      );
+    }
+
     match /trips/{tripId} {
       allow create: if isSignedIn();
       allow read: if hasTripAccess(resource.data);
-      allow update: if hasTripAccess(resource.data);
+      allow update: if isTripOwnerOrEditor(resource.data);
       allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
-
-      // Days Subcollection
-      match /days/{dayId} {
-        allow read, write: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
-      }
 
       // Flat Events Collection
       match /events/{eventId} {
-        allow read, write: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        allow read: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        allow write: if isTripOwnerOrEditor(get(/databases/$(database)/documents/trips/$(tripId)).data);
       }
     }
   }

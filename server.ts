@@ -109,7 +109,8 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
     }
 
     const ai = getGeminiClient();
-    const today = new Date('2026-07-09'); // Use the current local date provided in system constraints
+    const today = new Date();
+    const todayStr = today.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
     const responseSchema = {
       type: Type.OBJECT,
@@ -132,19 +133,20 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
             notes: { type: Type.STRING, description: "Brief notes about the event" },
             lat: { type: Type.NUMBER, description: "Latitude coordinate of this location" },
             lng: { type: Type.NUMBER, description: "Longitude coordinate of this location" },
-            isBooked: { type: Type.BOOLEAN, description: "True if the text implies this event is actually booked/confirmed (e.g. reservation numbers, 'I booked a hotel', 'got my tickets'). False if it is just a fixed date/event but not explicitly confirmed/booked yet." }
+            isBooked: { type: Type.BOOLEAN, description: "True if the text implies this event is actually booked/confirmed (e.g. reservation numbers, 'I booked a hotel', 'got my tickets'). False if it is just a fixed date/event but not explicitly confirmed/booked yet." },
+            timezone: { type: Type.STRING, description: "The IANA timezone identifier (e.g. 'America/Denver', 'Asia/Tokyo', 'Europe/Paris', 'America/New_York') inferred from the destination or location of the event." }
           },
-          required: ["title", "category", "date", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng", "isBooked"]
+          required: ["title", "category", "date", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng", "isBooked", "timezone"]
         }
       },
       required: ["title", "destination", "startDate", "endDate", "anchorEvent"]
     };
 
     const prompt = `You are an expert travel assistant. Analyze the user text below describing a fixed anchor event (like a wedding, concert, reservation) and extract the trip title, destination, suggested date range, and the details of the anchor event. 
-The current date is July 9, 2026. Use this to resolve relative date descriptions like 'next month', 'third week of September', 'this weekend', etc.
+The current date is ${todayStr}. Use this to resolve relative date descriptions like 'next month', 'third week of September', 'this weekend', etc.
 
 IMPORTANT DATE RULES:
-1. If the user specifies explicit travel dates (e.g., specific flight confirmation dates, explicit check-in/check-out hotel dates, or clear travel dates like 'Jul 29-30' or 'August 1 to August 5'), do NOT add any padding or buffer days. Set startDate and endDate to those exact dates.
+1. If the user specifies explicit travel dates (e.g., specific flight confirmation dates, explicit check-in/check-out hotel hotel dates, or clear travel dates like 'Jul 29-30' or 'August 1 to August 5'), do NOT add any padding or buffer days. Set startDate and endDate to those exact dates.
 2. Only add 2-3 buffer days before and after the anchor event if the anchor is vague (e.g. 'the third week of September', or a single day mentioned with no indication of trip length or duration) and real travel dates are not otherwise specified.
 
 User Text: "${anchorText}"`;
@@ -350,7 +352,12 @@ app.post('/api/copilot/action', async (req, res) => {
       prompt = `Create a completely fresh alternative full-day itinerary for this day in ${tripDetails?.destination || 'the destination'}. Original stops were: ${JSON.stringify(currentEvents)}. Return 'delete' changes for existing items you want to remove, and 'add' changes for the 4 new unique local experiences, dining, or secret viewpoints with proposed times.`;
     }
 
-    const modelToUse = 'gemini-3.5-flash';
+    // Task-based model tiering: 
+    // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly) to the cheapest/fastest eligible model (gemini-3.1-flash-lite)
+    // - Reserve the premium model (gemini-3.5-flash) for more complex, less frequent calls (full-day replans)
+    const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly')
+      ? 'gemini-3.1-flash-lite'
+      : 'gemini-3.5-flash';
 
     const response = await generateContentWithRetry(ai, {
       model: modelToUse,

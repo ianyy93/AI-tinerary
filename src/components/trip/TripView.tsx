@@ -16,8 +16,9 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
+import { inferTimezone } from '../../utils/timezone';
 
-const migrateTripEvents = async (tripId: string, currentSchemaVersion: number) => {
+const migrateTripEvents = async (tripId: string, currentSchemaVersion: number, destination?: string) => {
   if (currentSchemaVersion >= 2) return;
   console.log(`Migrating trip ${tripId} from schema version ${currentSchemaVersion} to 2`);
 
@@ -34,7 +35,7 @@ const migrateTripEvents = async (tripId: string, currentSchemaVersion: number) =
 
       for (const eventDoc of oldEventsSnap.docs) {
         const eventData = eventDoc.data();
-        const timezone = eventData.timezone || 'America/New_York';
+        const timezone = eventData.timezone || inferTimezone(destination);
         const startTime = eventData.startTime || '09:00';
         const endTime = eventData.endTime || '10:00';
 
@@ -120,6 +121,8 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
   const [editStatus, setEditStatus] = useState<TripStatus>('planning');
   const [editStatusOverride, setEditStatusOverride] = useState(false);
   const [showOrphanedBanner, setShowOrphanedBanner] = useState(false);
+  const [isReviewOpen, setIsReviewOpen] = useState(false);
+  const [events, setEvents] = useState<any[]>([]);
 
 
   useEffect(() => {
@@ -220,35 +223,17 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
 
       await updateDoc(docRef, updateData);
 
-      // If dates were added or modified, check if we need to initialize day documents
-      if (datesAddedOrChanged && editStartDate && editEndDate) {
+      // If dates were added or modified, update/recreate the days list
+      if (datesAddedOrChanged) {
         const daysRef = collection(db, `trips/${trip.id}/days`);
         const daysSnap = await getDocs(daysRef);
         
-        // Check for orphaned events
-        const eventsRef = collection(db, `trips/${trip.id}/events`);
-        const eventsSnap = await getDocs(eventsRef);
-        let hasOrphaned = false;
-        
-        // Parse dates carefully considering timezones might be tricky, but basic ISO comparison works for days
-        const newStartStr = editStartDate + "T00:00:00";
-        const newEndStr = editEndDate + "T23:59:59";
-        
-        eventsSnap.forEach(docSnap => {
-          const ev = docSnap.data();
-          const evStart = ev.startDateTime;
-          if (evStart < newStartStr || evStart > newEndStr) {
-             hasOrphaned = true;
-          }
-        });
-        
-        if (hasOrphaned) {
-          setShowOrphanedBanner(true);
-        } else {
-          setShowOrphanedBanner(false);
+        // Delete all old days
+        for (const dDoc of daysSnap.docs) {
+          await deleteDoc(doc(db, `trips/${trip.id}/days`, dDoc.id));
         }
 
-        if (daysSnap.empty) {
+        if (editStartDate && editEndDate) {
           const start = new Date(editStartDate);
           const end = new Date(editEndDate);
           const dayDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1);
@@ -284,7 +269,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
         setTrip(tripData);
 
         if (!tripData.schemaVersion || tripData.schemaVersion < 2) {
-          migrateTripEvents(snapshot.id, tripData.schemaVersion || 1);
+          migrateTripEvents(snapshot.id, tripData.schemaVersion || 1, tripData.destination);
         }
       } else {
         alert("Trip has been deleted or is inaccessible.");
@@ -312,8 +297,13 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       items.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
       setDays(items);
 
-      if (items.length > 0 && !selectedDayId) {
-        setSelectedDayId(items[0].id);
+      if (items.length > 0) {
+        const stillExists = items.some(d => d.id === selectedDayId);
+        if (!stillExists) {
+          setSelectedDayId(items[0].id);
+        }
+      } else {
+        setSelectedDayId(null);
       }
       setLoading(false);
     }, (err) => {
@@ -324,6 +314,37 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
 
     return () => unsubscribe();
   }, [tripId, selectedDayId]);
+
+  // 2.1 Fetch/listen to Events list in real-time
+  useEffect(() => {
+    if (!tripId) return;
+
+    const eventsRef = collection(db, `trips/${tripId}/events`);
+    const unsubscribe = onSnapshot(eventsRef, (snapshot) => {
+      const items: any[] = [];
+      snapshot.forEach((doc) => {
+        items.push({ id: doc.id, ...doc.data() });
+      });
+      setEvents(items);
+    }, (err) => {
+      console.error("Error listening to events:", err);
+      handleFirestoreError(err, OperationType.LIST, `trips/${tripId}/events`);
+    });
+
+    return () => unsubscribe();
+  }, [tripId]);
+
+  // 2.2 Calculate orphaned events reactively
+  const orphanedEvents = React.useMemo(() => {
+    if (!trip || !trip.startDate || !trip.endDate || events.length === 0) return [];
+    const tz = inferTimezone(trip.destination);
+    return events.filter(ev => {
+      if (!ev.startDateTime) return false;
+      const startLocal = DateTime.fromISO(ev.startDateTime).setZone(ev.timezone || tz);
+      const eventDateStr = startLocal.toFormat('yyyy-MM-dd');
+      return eventDateStr < trip.startDate || eventDateStr > trip.endDate;
+    });
+  }, [events, trip]);
 
   // 3. User Role resolution
   const userIdentifier = user.email || user.uid || '';
@@ -435,6 +456,49 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
     }
   };
 
+  // Event reassignment and removal handlers
+  const handleReassignEvent = async (eventId: string, newDateStr: string) => {
+    if (!trip) return;
+    try {
+      const ev = events.find(e => e.id === eventId);
+      if (!ev) return;
+      const tz = ev.timezone || inferTimezone(trip.destination);
+      
+      const dateParts = DateTime.fromISO(newDateStr);
+      const startOld = DateTime.fromISO(ev.startDateTime).setZone(tz);
+      const endOld = DateTime.fromISO(ev.endDateTime).setZone(tz);
+      const duration = endOld.diff(startOld);
+
+      const startNew = startOld.set({
+        year: dateParts.year,
+        month: dateParts.month,
+        day: dateParts.day
+      });
+      const endNew = startNew.plus(duration);
+
+      const eventDocRef = doc(db, `trips/${trip.id}/events`, eventId);
+      await updateDoc(eventDocRef, {
+        startDateTime: startNew.toISO(),
+        endDateTime: endNew.toISO()
+      });
+    } catch (err) {
+      console.error("Failed to reassign event date:", err);
+      alert("Failed to reassign event date.");
+    }
+  };
+
+  const handleRemoveEvent = async (eventId: string) => {
+    if (!trip) return;
+    if (!confirm("Are you sure you want to permanently delete this event?")) return;
+    try {
+      const eventDocRef = doc(db, `trips/${trip.id}/events`, eventId);
+      await deleteDoc(eventDocRef);
+    } catch (err) {
+      console.error("Failed to delete event:", err);
+      alert("Failed to delete event.");
+    }
+  };
+
   if (loading || !trip) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3">
@@ -521,14 +585,20 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
           </button>
         </div>
       </header>
-      {showOrphanedBanner && (
-        <div className="bg-amber-50 border-b border-amber-100 px-6 py-3 flex items-center justify-between">
+      {orphanedEvents.length > 0 && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 flex items-center justify-between shadow-sm shrink-0">
           <div className="flex items-center gap-2 text-amber-800 text-xs">
-            <ShieldAlert className="h-4 w-4" />
-            <span><b>Review needed:</b> You shrunk the trip dates, leaving some existing events outside the new range. They are preserved, but won't show on the timeline.</span>
+            <ShieldAlert className="h-4 w-4 shrink-0 text-amber-600 animate-pulse" />
+            <span>
+              <b>Review needed:</b> You shrunk the trip dates, and <b>{orphanedEvents.length} event{orphanedEvents.length > 1 ? 's' : ''}</b> fall{orphanedEvents.length === 1 ? 's' : ''} outside your new dates ({trip.startDate} to {trip.endDate}).
+            </span>
           </div>
-          <button onClick={() => setShowOrphanedBanner(false)} className="text-amber-800 hover:text-amber-900">
-            &times;
+          <button 
+            onClick={() => setIsReviewOpen(true)}
+            className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 shadow-sm shrink-0"
+          >
+            <Sparkles className="h-3 w-3" />
+            Review & Reassign
           </button>
         </div>
       )}
@@ -630,6 +700,102 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
           </div>
         </div>
       </div>
+
+      {/* COLLABORATOR SHARING PANEL MODAL */}
+      <AnimatePresence>
+        {isReviewOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl max-w-lg w-full border border-slate-100 p-6 shadow-xl flex flex-col gap-4 overflow-hidden"
+              id="review-modal"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="font-display font-bold text-base text-slate-900">Review Excluded Events</h3>
+                  <p className="text-xs text-slate-400">These events are preserved but currently sit outside your trip dates.</p>
+                </div>
+                <button 
+                  onClick={() => setIsReviewOpen(false)}
+                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition text-lg"
+                >
+                  &times;
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-3.5 max-h-[300px] overflow-y-auto pr-1">
+                {orphanedEvents.map((ev) => {
+                  const startLocal = DateTime.fromISO(ev.startDateTime).setZone(ev.timezone || inferTimezone(trip.destination));
+                  const currentEventDate = startLocal.toFormat('yyyy-MM-dd');
+                  const currentEventTime = startLocal.toFormat('HH:mm');
+                  
+                  return (
+                    <div key={ev.id} className="bg-slate-50 border border-slate-100 p-3 rounded-xl flex flex-col gap-3" id={`orphaned-event-${ev.id}`}>
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="font-bold text-xs text-slate-850">{ev.title}</div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">
+                            Original Date: <span className="font-mono text-slate-500">{currentEventDate}</span> at {currentEventTime}
+                          </div>
+                          {ev.locationName && (
+                            <div className="text-[10px] text-slate-400 mt-0.5">
+                              📍 {ev.locationName}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleRemoveEvent(ev.id)}
+                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition"
+                          title="Delete Event"
+                          id={`remove-orphaned-event-btn-${ev.id}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2 border-t border-slate-100/60 pt-2">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider shrink-0">Move to:</span>
+                        <input 
+                          type="date"
+                          min={trip.startDate}
+                          max={trip.endDate}
+                          defaultValue={trip.startDate}
+                          id={`reassign-date-${ev.id}`}
+                          className="px-2 py-1 border border-slate-200 rounded-md text-[11px] outline-none focus:border-indigo-500 bg-white"
+                        />
+                        <button
+                          onClick={() => {
+                            const inputEl = document.getElementById(`reassign-date-${ev.id}`) as HTMLInputElement;
+                            if (inputEl) {
+                              handleReassignEvent(ev.id, inputEl.value);
+                            }
+                          }}
+                          className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md text-[10px] font-bold transition ml-auto"
+                          id={`confirm-reassign-btn-${ev.id}`}
+                        >
+                          Confirm Move
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex justify-end border-t border-slate-100 pt-3 mt-1">
+                <button
+                  onClick={() => setIsReviewOpen(false)}
+                  className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition"
+                  id="close-review-modal-btn"
+                >
+                  Done Reviewing
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* COLLABORATOR SHARING PANEL MODAL */}
       <AnimatePresence>
@@ -1008,6 +1174,117 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* TRAVELERS MANAGEMENT INSIDE SETTINGS */}
+                <div className="flex flex-col gap-2.5 border-t border-slate-100 pt-3 mt-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Travelers list</label>
+                  
+                  {/* Current Travelers Display */}
+                  <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto pr-1">
+                    {(!trip.travelers || trip.travelers.length === 0) ? (
+                      <div className="text-center py-4 text-[11px] text-slate-400 italic">
+                        No travelers specified yet. Add travelers below.
+                      </div>
+                    ) : (
+                      trip.travelers.map((traveler) => {
+                        const initials = traveler.name
+                          .split(' ')
+                          .map((n) => n[0])
+                          .join('')
+                          .toUpperCase()
+                          .slice(0, 2);
+                        return (
+                          <div key={traveler.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 p-2 rounded-xl text-xs">
+                            <div className="flex items-center gap-2">
+                              <span className={`h-6 w-6 rounded-full ${traveler.color || 'bg-slate-500'} text-[9px] font-bold text-white flex items-center justify-center`}>
+                                {initials}
+                              </span>
+                              <div className="flex flex-col">
+                                <span className="font-bold text-slate-700">{traveler.name}</span>
+                                {traveler.email && (
+                                  <span className="text-[9px] text-slate-400 font-mono">Linked: {traveler.email}</span>
+                                )}
+                              </div>
+                            </div>
+                            {userRole !== 'viewer' && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveTraveler(traveler.id)}
+                                className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition"
+                                title="Remove Traveler"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Add Traveler Subsection */}
+                  {userRole !== 'viewer' && (
+                    <div className="bg-slate-50/50 p-3 rounded-xl border border-slate-100/60 flex flex-col gap-2.5">
+                      <span className="text-[10px] font-bold text-slate-600 uppercase">Add New Traveler</span>
+                      
+                      <div className="flex flex-col gap-1">
+                        <input 
+                          type="text" 
+                          placeholder="Traveler name (e.g. John Doe)"
+                          value={travelerName}
+                          onChange={(e) => setTravelerName(e.target.value)}
+                          className="px-2.5 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
+                        />
+                      </div>
+
+                      {/* Avatar Color Picker */}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Avatar Color</span>
+                        <div className="flex flex-wrap gap-1">
+                          {TRAVELER_COLORS.map((col) => (
+                            <button
+                              type="button"
+                              key={col.class}
+                              onClick={() => setTravelerColor(col.class)}
+                              className={`h-4.5 w-4.5 rounded-full ${col.class} transition flex items-center justify-center ${
+                                travelerColor === col.class ? 'ring-2 ring-indigo-500 scale-110 shadow-sm' : 'hover:scale-105'
+                              }`}
+                              title={col.name}
+                            >
+                              {travelerColor === col.class && <Check className="h-2.5 w-2.5 text-white" />}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Optional Linked Collaborator Email */}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Linked Collaborator (Optional)</span>
+                        <select
+                          value={travelerEmail}
+                          onChange={(e) => setTravelerEmail(e.target.value)}
+                          className="px-2 py-1 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white transition"
+                        >
+                          <option value="">-- Unlinked / No account (e.g. kids) --</option>
+                          {Array.from(new Set([...(user.email ? [user.email] : []), ...Object.keys(trip.collaborators || {})])).map((email) => (
+                            <option key={email} value={email}>
+                              {email}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => handleAddTraveler(e)}
+                        className="py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs rounded-lg transition flex items-center justify-center gap-1"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>Add to List</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-3.5 border-t border-slate-100 pt-4 mt-2">
