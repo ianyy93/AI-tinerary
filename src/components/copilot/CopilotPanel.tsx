@@ -34,6 +34,8 @@ const WIZARD_STEPS = [
 export default function CopilotPanel({ trip, selectedDayId, days, userRole }: CopilotPanelProps) {
   // Wizard States
   const [activeStep, setActiveStep] = useState<number | null>(null);
+  const [showWizardConfig, setShowWizardConfig] = useState(false);
+  const [selectedWizardSteps, setSelectedWizardSteps] = useState<number[]>([1, 2, 3, 4, 5, 6]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [wizardData, setWizardData] = useState<any>({
     stays: [],
@@ -44,6 +46,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     logistics: [],
   });
   const [currentSuggestions, setCurrentSuggestions] = useState<any[]>([]);
+  const [selectedSuggestionIndices, setSelectedSuggestionIndices] = useState<number[]>([]);
   const [activeStepPrompt, setActiveStepPrompt] = useState('');
   const [customDayPrompt, setCustomDayPrompt] = useState('');
 
@@ -177,6 +180,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
     setIsGenerating(true);
     setCurrentSuggestions([]);
+    setSelectedSuggestionIndices([]);
     try {
       const response = await fetch('/api/copilot/wizard-step', {
         method: 'POST',
@@ -208,6 +212,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       const res = await response.json();
       if (res.success && Array.isArray(res.data)) {
         setCurrentSuggestions(res.data);
+        setSelectedSuggestionIndices(res.data.map((_, i) => i));
         incrementAiUsage();
       } else {
         alert(res.error || 'Failed to generate travel items.');
@@ -221,31 +226,121 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
   };
 
   // 2. Accept and proceed step
-  const handleAcceptStep = (stepNum: number) => {
-    const keyMap: Record<number, string> = {
-      1: 'stays',
-      2: 'morning',
-      3: 'afternoon',
-      4: 'evening',
-      5: 'dining',
-      6: 'logistics',
-    };
+  const handleAcceptStep = async (stepNum: number) => {
+    setIsGenerating(true);
+    try {
+      const keyMap: Record<number, string> = {
+        1: 'stays',
+        2: 'morning',
+        3: 'afternoon',
+        4: 'evening',
+        5: 'dining',
+        6: 'logistics',
+      };
 
-    const key = keyMap[stepNum];
-    setWizardData((prev: any) => ({
-      ...prev,
-      [key]: currentSuggestions,
-    }));
+      const key = keyMap[stepNum];
+      const acceptedItems = currentSuggestions.filter((_, idx) => selectedSuggestionIndices.includes(idx));
 
-    setActiveStepPrompt('');
+      // Save to local wizardData for summary screen
+      setWizardData((prev: any) => ({
+        ...prev,
+        [key]: acceptedItems,
+      }));
 
-    if (stepNum < 6) {
-      setActiveStep(stepNum + 1);
-      // Automatically generate next step's suggestions for smoother wizard UX
-      handleGenerateStep(stepNum + 1);
-    } else {
-      // Finished all steps
-      setActiveStep(7); // Show assembly completion view!
+      // Commit to firestore immediately
+      const tripDays = [...days].sort((a, b) => a.dateStr.localeCompare(b.dateStr));
+
+      if (stepNum === 1 && acceptedItems.length > 0 && tripDays.length > 0) {
+        const firstDay = tripDays[0];
+        const staysColl = collection(db, `trips/${trip.id}/events`);
+        for (const stay of acceptedItems) {
+          const stayTz = inferTimezone(stay.locationName || trip.destination);
+          const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          await addDoc(staysColl, {
+            title: `Check-in: ${stay.title}`,
+            category: 'stay',
+            startDateTime: startLocal.toISO(),
+            endDateTime: endLocal.toISO(),
+            timezone: stayTz,
+            locationName: stay.locationName,
+            address: stay.address,
+            notes: stay.notes,
+            coordinates: { lat: stay.lat, lng: stay.lng },
+            dogFriendly: trip.petFriendly,
+            reservationNumber: `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+            source: 'wizard',
+          });
+        }
+        
+        if (trip.status === 'planning' || trip.status === 'upcoming' || trip.status === 'draft') {
+          const tripDocRef = doc(db, 'trips', trip.id);
+          await updateDoc(tripDocRef, { status: 'booking' });
+        }
+      } else if (stepNum > 1 && acceptedItems.length > 0) {
+        const categoryMap: Record<number, string> = {
+          2: 'activity',
+          3: 'activity',
+          4: 'activity',
+          5: 'food',
+          6: 'logistics',
+        };
+        const category = categoryMap[stepNum];
+        const eventsColl = collection(db, `trips/${trip.id}/events`);
+        
+        for (const item of acceptedItems) {
+          const dayIdx = item.dayIndex || 0;
+          if (dayIdx >= 0 && dayIdx < tripDays.length) {
+            const targetDay = tripDays[dayIdx];
+            const itemStartTime = item.startTime || '10:00';
+            const itemEndTime = item.endTime || '11:30';
+
+            const itemTz = inferTimezone(item.locationName || item.title || trip.destination);
+            const startLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemStartTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
+            const endLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemEndTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
+
+            let finalEndLocal = endLocal;
+            if (endLocal < startLocal) {
+              finalEndLocal = endLocal.plus({ days: 1 });
+            }
+
+            await addDoc(eventsColl, {
+              title: item.title,
+              category: category,
+              startDateTime: startLocal.toISO(),
+              endDateTime: finalEndLocal.toISO(),
+              timezone: itemTz,
+              locationName: item.locationName,
+              address: item.address,
+              notes: item.notes,
+              coordinates: { lat: item.lat, lng: item.lng },
+              dogFriendly: trip.petFriendly,
+              source: 'wizard',
+            });
+          }
+        }
+      }
+
+      setActiveStepPrompt('');
+      setCurrentSuggestions([]);
+      setSelectedSuggestionIndices([]);
+
+      const currentIndex = selectedWizardSteps.indexOf(stepNum);
+      const nextStepNum = selectedWizardSteps[currentIndex + 1];
+
+      if (nextStepNum) {
+        setActiveStep(nextStepNum);
+        // Automatically generate next step's suggestions for smoother wizard UX
+        handleGenerateStep(nextStepNum);
+      } else {
+        // Finished all steps
+        setActiveStep(7); // Show assembly completion view!
+      }
+    } catch (e: any) {
+      console.error(e);
+      alert('Error saving items: ' + e.message);
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -269,130 +364,23 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     setActiveStepPrompt('');
     setCurrentSuggestions([]);
 
-    if (stepNum < 6) {
-      setActiveStep(stepNum + 1);
+    const currentIndex = selectedWizardSteps.indexOf(stepNum);
+    const nextStepNum = selectedWizardSteps[currentIndex + 1];
+
+    if (nextStepNum) {
+      setActiveStep(nextStepNum);
       // Automatically generate next step's suggestions for smoother wizard UX
-      handleGenerateStep(stepNum + 1);
+      handleGenerateStep(nextStepNum);
     } else {
       setActiveStep(7);
     }
   };
 
-  // 3. Assemble and Commit Itinerary to Firestore
-  const handleAssembleAndCommit = async () => {
-    if (userRole === 'viewer') return;
-    setIsGenerating(true);
-    try {
-      // We need to fetch the days of the current trip to map suggestions to day indices
-      const daysRef = collection(db, `trips/${trip.id}/days`);
-      let daysSnap;
-      try {
-        daysSnap = await getDocs(daysRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, `trips/${trip.id}/days`);
-        throw err;
-      }
-      const tripDays = daysSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as Day);
-      tripDays.sort((a, b) => a.dateStr.localeCompare(b.dateStr));
-
-      // 1. Commit Stays (These are added to EVERY DAY as accommodation stops or as a stay item)
-      // We will place stays on Day 1 (or make them cover the duration)
-      if (wizardData.stays.length > 0 && tripDays.length > 0) {
-        const firstDay = tripDays[0];
-        const staysColl = collection(db, `trips/${trip.id}/events`);
-        for (const stay of wizardData.stays) {
-          try {
-            const stayTz = inferTimezone(stay.locationName || trip.destination);
-            const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
-            const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
-            await addDoc(staysColl, {
-              title: `Check-in: ${stay.title}`,
-              category: 'stay',
-              startDateTime: startLocal.toISO(),
-              endDateTime: endLocal.toISO(),
-              timezone: stayTz,
-              locationName: stay.locationName,
-              address: stay.address,
-              notes: stay.notes,
-              coordinates: { lat: stay.lat, lng: stay.lng },
-              dogFriendly: trip.petFriendly,
-              reservationNumber: `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
-            });
-          } catch (err) {
-            handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
-            throw err;
-          }
-        }
-      }
-
-      // Helper to add list of suggested items to respective days in Firestore
-      const commitItems = async (items: any[], category: string) => {
-        const eventsColl = collection(db, `trips/${trip.id}/events`);
-        for (const item of items) {
-          const dayIdx = item.dayIndex || 0;
-          if (dayIdx >= 0 && dayIdx < tripDays.length) {
-            const targetDay = tripDays[dayIdx];
-            const itemStartTime = item.startTime || '10:00';
-            const itemEndTime = item.endTime || '11:30';
-
-            const itemTz = inferTimezone(item.locationName || item.title || trip.destination);
-            const startLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemStartTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
-            const endLocal = DateTime.fromFormat(`${targetDay.dateStr} ${itemEndTime}`, 'yyyy-MM-dd HH:mm', { zone: itemTz });
-
-            let finalEndLocal = endLocal;
-            if (endLocal < startLocal) {
-              finalEndLocal = endLocal.plus({ days: 1 });
-            }
-
-            try {
-              await addDoc(eventsColl, {
-                title: item.title,
-                category: category,
-                startDateTime: startLocal.toISO(),
-                endDateTime: finalEndLocal.toISO(),
-                timezone: itemTz,
-                locationName: item.locationName,
-                address: item.address,
-                notes: item.notes,
-                coordinates: { lat: item.lat, lng: item.lng },
-                dogFriendly: trip.petFriendly,
-              });
-            } catch (err) {
-              handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
-              throw err;
-            }
-          }
-        }
-      };
-
-      await commitItems(wizardData.morning, 'activity');
-      await commitItems(wizardData.afternoon, 'activity');
-      await commitItems(wizardData.evening, 'activity');
-      await commitItems(wizardData.dining, 'food');
-      await commitItems(wizardData.logistics, 'logistics');
-
-      // Update trip status to booking because we added stays with auto-reservation numbers
-      if (trip.status === 'planning' || trip.status === 'upcoming' || trip.status === 'draft') {
-        try {
-          const { doc, updateDoc } = await import('firebase/firestore');
-          const tripDocRef = doc(db, 'trips', trip.id);
-          await updateDoc(tripDocRef, { status: 'booking' });
-        } catch (err) {
-          console.error("Error auto-updating trip status to booking:", err);
-        }
-      }
-
-      // Reset Wizard States
-      setActiveStep(null);
-      setWizardData({ stays: [], morning: [], afternoon: [], evening: [], dining: [], logistics: [] });
-      setCurrentSuggestions([]);
-      alert("Successfully assembled your tailored trip! Check your itinerary map and timeline.");
-    } catch (e) {
-      console.error(e);
-      alert("Error committing plans to real-time database.");
-    } finally {
-      setIsGenerating(false);
-    }
+  const handleFinishWizard = () => {
+    setActiveStep(null);
+    setWizardData({ stays: [], morning: [], afternoon: [], evening: [], dining: [], logistics: [] });
+    setCurrentSuggestions([]);
+    setShowWizardConfig(false);
   };
 
   // Day-to-Day Handlers
@@ -632,16 +620,59 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                 </div>
               </div>
 
-              <button
-                onClick={() => {
-                  setActiveStep(1);
-                  handleGenerateStep(1);
-                }}
-                className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg transition shadow-md shadow-indigo-950 flex items-center justify-center gap-1.5"
-              >
-                <Play className="h-3.5 w-3.5" />
-                Launch 6-Step Wizard
-              </button>
+              {showWizardConfig ? (
+                <div className="flex flex-col gap-2 mt-2 border-t border-slate-700/50 pt-3">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Select Categories</span>
+                  {WIZARD_STEPS.map(step => (
+                    <label key={step.step} className="flex items-center gap-2 cursor-pointer group">
+                      <input 
+                        type="checkbox"
+                        checked={selectedWizardSteps.includes(step.step)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedWizardSteps(prev => [...prev, step.step].sort((a, b) => a - b));
+                          } else {
+                            setSelectedWizardSteps(prev => prev.filter(s => s !== step.step));
+                          }
+                        }}
+                        className="rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500/30"
+                      />
+                      <span className="text-[11px] text-slate-300 group-hover:text-white transition">{step.name}</span>
+                    </label>
+                  ))}
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      onClick={() => {
+                        const firstStep = selectedWizardSteps[0];
+                        if (firstStep) {
+                          setActiveStep(firstStep);
+                          handleGenerateStep(firstStep);
+                          setShowWizardConfig(false);
+                        }
+                      }}
+                      disabled={selectedWizardSteps.length === 0}
+                      className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg transition shadow-md shadow-indigo-950 flex items-center justify-center gap-1.5"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      Start
+                    </button>
+                    <button
+                      onClick={() => setShowWizardConfig(false)}
+                      className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white font-bold text-xs rounded-lg transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowWizardConfig(true)}
+                  className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg transition shadow-md shadow-indigo-950 flex items-center justify-center gap-1.5"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  Launch 6-Step Wizard
+                </button>
+              )}
             </div>
           ) : (
             /* ACTIVE WIZARD STAGE VIEW */
@@ -649,12 +680,13 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
               {/* Progress Tracker */}
               <div className="flex items-center justify-between border-b border-slate-700 pb-2">
                 <div className="text-[11px] font-mono text-slate-400 font-semibold">
-                  Wizard: Step {activeStep <= 6 ? `${activeStep} / 6` : 'Assembly'}
+                  Wizard: Step {activeStep <= 6 && selectedWizardSteps.includes(activeStep) ? `${selectedWizardSteps.indexOf(activeStep) + 1} / ${selectedWizardSteps.length}` : 'Assembly'}
                 </div>
                 <button
                   onClick={() => {
                     setActiveStep(null);
                     setWizardData({ stays: [], morning: [], afternoon: [], evening: [], dining: [], logistics: [] });
+                    setShowWizardConfig(false);
                   }}
                   className="text-[10px] text-slate-400 hover:text-white transition"
                 >
@@ -705,16 +737,30 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                   ) : (
                     <div className="flex flex-col gap-2 max-h-[180px] overflow-y-auto pr-1">
                       {currentSuggestions.map((s, idx) => (
-                        <div key={idx} className="bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
-                          <div className="flex items-center justify-between text-[11px]">
-                            <span className="font-bold text-indigo-400">{s.title || s.locationName}</span>
-                            {s.dayIndex !== undefined && (
-                              <span className="text-[9px] font-mono text-slate-400 bg-slate-800 px-1 py-0.5 rounded">Day {s.dayIndex + 1}</span>
-                            )}
+                        <label key={idx} className="bg-slate-900 border border-slate-800 p-2.5 rounded-lg flex gap-2 items-start cursor-pointer group">
+                          <input
+                            type="checkbox"
+                            checked={selectedSuggestionIndices.includes(idx)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedSuggestionIndices(prev => [...prev, idx]);
+                              } else {
+                                setSelectedSuggestionIndices(prev => prev.filter(i => i !== idx));
+                              }
+                            }}
+                            className="mt-0.5 rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500/30"
+                          />
+                          <div className="flex-1">
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="font-bold text-indigo-400">{s.title || s.locationName}</span>
+                              {s.dayIndex !== undefined && (
+                                <span className="text-[9px] font-mono text-slate-400 bg-slate-800 px-1 py-0.5 rounded">Day {s.dayIndex + 1}</span>
+                              )}
+                            </div>
+                            <p className="text-[10px] text-slate-400 mt-1 leading-snug">{s.notes}</p>
+                            <div className="text-[9px] font-mono text-slate-500 mt-1">{s.address}</div>
                           </div>
-                          <p className="text-[10px] text-slate-400 mt-1 leading-snug">{s.notes}</p>
-                          <div className="text-[9px] font-mono text-slate-500 mt-1">{s.address}</div>
-                        </div>
+                        </label>
                       ))}
                     </div>
                   )}
@@ -750,18 +796,29 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                 <div className="flex flex-col gap-3">
                   <div className="flex items-center gap-2 text-emerald-400">
                     <CheckCircle2 className="h-4.5 w-4.5" />
-                    <h5 className="font-display font-bold text-xs">Structure Prepared!</h5>
+                    <h5 className="font-display font-bold text-xs">Trip Populated!</h5>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-snug">
-                    All 6 discrete segments (hotels, walks, meals, flights) have been validated and compiled into local cache.
+                    All selected wizard categories have been processed and added to your itinerary.
                   </p>
+                  
+                  <div className="bg-slate-900/50 rounded-lg p-3 text-[10px] text-slate-300 font-mono">
+                    <div className="mb-1 text-slate-500 uppercase font-bold tracking-wider">Items Added</div>
+                    <ul className="space-y-1">
+                      <li>Stays: {wizardData.stays.length}</li>
+                      <li>Morning: {wizardData.morning.length}</li>
+                      <li>Afternoon: {wizardData.afternoon.length}</li>
+                      <li>Evening: {wizardData.evening.length}</li>
+                      <li>Dining: {wizardData.dining.length}</li>
+                      <li>Logistics: {wizardData.logistics.length}</li>
+                    </ul>
+                  </div>
 
                   <button
-                    onClick={handleAssembleAndCommit}
-                    disabled={isGenerating}
+                    onClick={handleFinishWizard}
                     className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg transition flex items-center justify-center gap-1"
                   >
-                    {isGenerating ? 'Saving to Cloud...' : 'Commit Complete Itinerary'}
+                    Done
                   </button>
                 </div>
               )}
