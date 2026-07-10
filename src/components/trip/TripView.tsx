@@ -512,57 +512,59 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
     <div className="min-h-screen bg-slate-50/50 flex flex-col font-sans h-screen overflow-hidden" id="trip-view-root">
       
       {/* Dynamic Header */}
-      <header className="bg-white border-b border-slate-100 px-6 py-4 flex items-center justify-between shrink-0" id="header">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="bg-white border-b border-slate-100 px-4 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0" id="header">
+        <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
           <button 
             onClick={onBackToHub}
-            className="p-2 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-800 transition"
+            className="p-2 rounded-lg hover:bg-slate-50 text-slate-500 hover:text-slate-800 transition shrink-0"
           >
             <ArrowLeft className="h-5 w-5" />
           </button>
           
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h2 className="font-display font-bold text-lg text-slate-900 truncate leading-snug">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="font-display font-bold text-base sm:text-lg text-slate-900 truncate leading-snug max-w-[200px] sm:max-w-none">
                 {trip.title}
               </h2>
-              {userRole !== 'viewer' && (
-                <button 
-                  onClick={() => setIsEditOpen(true)}
-                  className="p-1 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition shrink-0"
-                  title="Trip Settings"
-                >
-                  <Settings className="h-4 w-4" />
-                </button>
-              )}
-              {trip.petFriendly && (
-                <div className="h-5 w-5 rounded bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
-                  <Dog className="h-3 w-3" />
-                </div>
-              )}
+              <div className="flex items-center gap-1 shrink-0">
+                {userRole !== 'viewer' && (
+                  <button 
+                    onClick={() => setIsEditOpen(true)}
+                    className="p-1 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
+                    title="Trip Settings"
+                  >
+                    <Settings className="h-4 w-4" />
+                  </button>
+                )}
+                {trip.petFriendly && (
+                  <div className="h-5 w-5 rounded bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <Dog className="h-3 w-3" />
+                  </div>
+                )}
+              </div>
             </div>
             
-            <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
-              <span>📍 {trip.destination}</span>
-              <span>&bull;</span>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400 mt-1">
+              <span className="flex items-center gap-1">📍 {trip.destination}</span>
+              <span className="text-slate-300 hidden sm:inline">&bull;</span>
               <span>
                 {trip.status === 'dreaming' || !trip.startDate || !trip.endDate ? (
-                  <span className="text-purple-600 font-semibold bg-purple-50 px-1.5 py-0.5 rounded">
+                  <span className="text-purple-600 font-semibold bg-purple-50 px-1.5 py-0.5 rounded text-[10px]">
                     🔮 Dreaming (No dates set)
                   </span>
                 ) : (
-                  `📅 ${trip.startDate} to ${trip.endDate}`
+                  <span className="flex items-center gap-1">📅 {trip.startDate} to {trip.endDate}</span>
                 )}
               </span>
-              <span>&bull;</span>
-              <span className="font-mono text-[10px] text-indigo-500 bg-indigo-50/70 px-1.5 py-0.2 rounded uppercase font-bold">
+              <span className="text-slate-300 hidden sm:inline">&bull;</span>
+              <span className="font-mono text-[10px] text-indigo-500 bg-indigo-50/70 px-1.5 py-0.2 rounded uppercase font-bold tracking-wider">
                 {userRole}
               </span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 justify-end sm:justify-start w-full sm:w-auto shrink-0">
 
 
           {/* Travelers Button */}
