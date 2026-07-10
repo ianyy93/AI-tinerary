@@ -298,12 +298,12 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       setDays(items);
 
       if (items.length > 0) {
-        const stillExists = items.some(d => d.id === selectedDayId);
+        const stillExists = selectedDayId === 'stays-flights' || items.some(d => d.id === selectedDayId);
         if (!stillExists) {
           setSelectedDayId(items[0].id);
         }
       } else {
-        setSelectedDayId(null);
+        setSelectedDayId(selectedDayId === 'stays-flights' ? 'stays-flights' : null);
       }
       setLoading(false);
     }, (err) => {
@@ -706,7 +706,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       {/* COLLABORATOR SHARING PANEL MODAL */}
       <AnimatePresence>
         {isReviewOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -802,7 +802,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       {/* COLLABORATOR SHARING PANEL MODAL */}
       <AnimatePresence>
         {isShareOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -888,7 +888,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       {/* TRIP TRAVELERS PANEL MODAL */}
       <AnimatePresence>
         {isTravelerOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -1026,7 +1026,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       {/* EDIT TRIP DETAILS MODAL */}
       <AnimatePresence>
         {isEditOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}

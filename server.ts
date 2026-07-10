@@ -51,8 +51,8 @@ async function generateContentWithRetry(
   maxRetries = 3
 ): Promise<any> {
   let delay = 1000;
-  // Fallback chain: Primary -> gemini-flash-latest -> gemini-3.1-flash-lite
-  const models = Array.from(new Set([params.model, 'gemini-flash-latest', 'gemini-3.1-flash-lite']));
+  // Fallback chain: Primary -> gemini-2.5-flash -> gemini-3.1-flash-lite
+  const models = Array.from(new Set([params.model, 'gemini-2.5-flash', 'gemini-3.1-flash-lite']));
 
   for (const model of models) {
     let attempt = 0;
@@ -71,7 +71,7 @@ async function generateContentWithRetry(
         const code = err?.code || 0;
         const errMsgLower = message.toLowerCase();
 
-        console.error(`Gemini API call failed (model: ${model}, attempt: ${attempt}, error: ${message})`);
+        console.warn(`Gemini API model attempt failed (model: ${model}, attempt: ${attempt}, message: ${message})`);
 
         // Check if the error indicates the model is overloaded or unavailable (503 / High Demand)
         const isOverloaded = 
@@ -152,7 +152,7 @@ IMPORTANT DATE RULES:
 User Text: "${anchorText}"`;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-3.5-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -172,7 +172,7 @@ User Text: "${anchorText}"`;
 // 1. Wizard Step API endpoint
 app.post('/api/copilot/wizard-step', async (req, res) => {
   try {
-    const { step, destination, tripType, petFriendly, startDate, endDate, previousData } = req.body;
+    const { step, destination, tripType, petFriendly, startDate, endDate, previousData, customPrompt } = req.body;
     const ai = getGeminiClient();
 
     let stepPrompt = '';
@@ -314,8 +314,12 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
       };
     }
 
+    if (customPrompt && typeof customPrompt === 'string' && customPrompt.trim()) {
+      stepPrompt += `\n\nCRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated recommendations to strongly align with and satisfy this specific prompt/request: "${customPrompt.trim()}"`;
+    }
+
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-3.5-flash',
+      model: 'gemini-2.5-flash',
       contents: stepPrompt,
       config: {
         systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -335,7 +339,7 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
 // 2. Interactive Day-by-Day Copilot Actions endpoint
 app.post('/api/copilot/action', async (req, res) => {
   try {
-    const { action, currentEvents, tripDetails } = req.body;
+    const { action, currentEvents, tripDetails, customPrompt } = req.body;
     const ai = getGeminiClient();
 
     let systemInstruction = "You are an elite travel concierge. Output your response EXACTLY as a JSON object matching this schema:\n\n{ \"advice\": \"Markdown text describing your rationale/response.\", \"proposedChanges\": [ { \"type\": \"update\" | \"add\" | \"delete\", \"eventId\": \"optional id of the existing event to modify/delete\", \"event\": { \"title\": \"...\", \"category\": \"activity|food|stay|travel|logistics\", \"startTime\": \"HH:mm\", \"endTime\": \"HH:mm\", \"locationName\": \"...\", \"notes\": \"...\" } } ] }\n\nOnly include 'proposedChanges' if your action naturally results in altering the itinerary (like replanning, reordering, or adding dog-friendly spots). For pure advice (like connection-checks), leave proposedChanges empty.";
@@ -347,6 +351,14 @@ app.post('/api/copilot/action', async (req, res) => {
       prompt = `Review this itinerary day: ${JSON.stringify(currentEvents)}. Flag any tight connections (less than 30 mins between activities), unrealistic driving times, overlapping bookings, or missed logistics. Return purely 'advice' as a checklist.`;
     } else if (action === 'dog-friendly') {
       prompt = `Review this day's itinerary: ${JSON.stringify(currentEvents)}. Recommend 2 nearby dog-friendly activities, parks, or café patios near these stops in ${tripDetails?.destination || 'the area'}. Give clear directions and dog policies. Add these as 'add' changes.`;
+    } else if (action === 'custom') {
+      prompt = `Apply this custom modification to this day's itinerary: "${customPrompt}". 
+Current stops for this day are: ${JSON.stringify(currentEvents)}. 
+Please analyze the existing stops, respect the user's custom prompt, and return:
+1. 'delete' changes for existing items you want to remove.
+2. 'add' changes for new unique experiences, dining, or segments to add.
+3. 'update' changes for any existing items to adjust.
+Use the 'advice' field to describe your logic and rationale to the user.`;
     } else {
       // Replan day
       prompt = `Create a completely fresh alternative full-day itinerary for this day in ${tripDetails?.destination || 'the destination'}. Original stops were: ${JSON.stringify(currentEvents)}. Return 'delete' changes for existing items you want to remove, and 'add' changes for the 4 new unique local experiences, dining, or secret viewpoints with proposed times.`;
@@ -354,10 +366,10 @@ app.post('/api/copilot/action', async (req, res) => {
 
     // Task-based model tiering: 
     // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly) to the cheapest/fastest eligible model (gemini-3.1-flash-lite)
-    // - Reserve the premium model (gemini-3.5-flash) for more complex, less frequent calls (full-day replans)
+    // - Reserve the premium model (gemini-2.5-flash) for more complex, less frequent calls (full-day replans or custom edits)
     const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly')
       ? 'gemini-3.1-flash-lite'
-      : 'gemini-3.5-flash';
+      : 'gemini-2.5-flash';
 
     const response = await generateContentWithRetry(ai, {
       model: modelToUse,
@@ -378,6 +390,128 @@ app.post('/api/copilot/action', async (req, res) => {
   } catch (error: any) {
     console.error('Copilot Action AI Error:', error);
     res.status(500).json({ success: false, error: error.message || 'AI Copilot Action Failed' });
+  }
+});
+
+// Proxy OpenStreetMap Nominatim requests safely on the server to bypass browser CORS and header limitations
+app.get('/api/geocode', async (req, res) => {
+  try {
+    const q = req.query.q;
+    if (!q || typeof q !== 'string') {
+      return res.status(400).json({ success: false, error: 'Query parameter q is required.' });
+    }
+
+    const limit = typeof req.query.limit === 'string' ? parseInt(req.query.limit) || 1 : 1;
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=${limit}`;
+
+    console.log(`Server-side Geocoding Nominatim query: "${q}"`);
+    let data: any[] = [];
+    
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'AI-tinerary-Travel-Planner-Server/1.0',
+          'Accept': 'application/json'
+        }
+      });
+      if (response.ok) {
+        data = await response.json();
+      } else {
+        console.warn(`Nominatim API returned status ${response.status}`);
+      }
+    } catch (osmError) {
+      console.warn("OSM Nominatim fetch failed, falling back to Gemini:", osmError);
+    }
+
+    // If OSM returned no results or failed, use Gemini as the geocoder!
+    if (!data || data.length === 0) {
+      console.log(`OSM returned 0 results. Resolving coordinates via Gemini for: "${q}"`);
+      try {
+        const ai = getGeminiClient();
+        const prompt = `You are a high-precision travel geocoder. For the location or address query: "${q}", determine the best possible approximate latitude and longitude coordinates.
+Return ONLY a valid JSON object matching this schema:
+{
+  "lat": number,
+  "lng": number,
+  "displayName": "The formatted name of the location or address"
+}
+Do not include any markdown formatting, backticks, or extra explanation. Just raw JSON.`;
+
+        const aiResponse = await generateContentWithRetry(ai, {
+          model: 'gemini-2.5-flash',
+          contents: prompt,
+          config: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+          }
+        });
+
+        const text = aiResponse.text || '';
+        const parsed = JSON.parse(text.trim());
+        if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+          data = [{
+            lat: parsed.lat.toString(),
+            lon: parsed.lng.toString(),
+            display_name: parsed.displayName || q
+          }];
+          console.log(`Gemini successfully geocoded "${q}" to:`, parsed);
+        }
+      } catch (geminiError) {
+        console.error("Gemini fallback geocoding failed:", geminiError);
+      }
+    }
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    console.error('Server Geocoding Error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Geocoding request failed.' });
+  }
+});
+
+app.post('/api/parse-email', async (req, res) => {
+  try {
+    const { emailText, tripDestination, category } = req.body;
+    if (!emailText) {
+      return res.status(400).json({ success: false, error: 'Email text is required.' });
+    }
+
+    const ai = getGeminiClient();
+    const prompt = `You are an AI travel assistant that extracts itinerary events from confirmation emails.
+Given the email text below, extract the event details.
+Category context: ${category} (either stay or travel).
+Trip destination context: ${tripDestination}.
+
+Return ONLY a valid JSON object with the following fields:
+- title (string): A short, descriptive title (e.g. "Flight UA123 to LAX", "Check-in: Marriott Hotel")
+- startDateTimeLocal (string): The start date and time in format "YYYY-MM-DDTHH:mm". Guess the year if missing based on near future.
+- endDateTimeLocal (string): The end date and time in format "YYYY-MM-DDTHH:mm".
+- locationName (string): The name of the main location (e.g. hotel name, departure airport)
+- address (string): The street address or specific terminal/gate info if available
+- reservationNumber (string): The booking reference, confirmation code, or PNR
+- notes (string): Any other relevant details (seat number, class, cancellation policy, instructions)
+
+If you cannot determine a field, return an empty string for it.
+
+Email Text:
+"""
+${emailText}
+"""
+`;
+
+    const response = await generateContentWithRetry(ai, {
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        temperature: 0.1,
+        responseMimeType: "application/json",
+      }
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    res.json({ success: true, data: parsed });
+  } catch (error: any) {
+    console.error('Email Parse Error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Email parsing failed' });
   }
 });
 

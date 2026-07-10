@@ -72,6 +72,87 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [filterTravelerId, setFilterTravelerId] = useState<string>('everyone');
   const [eventTravelerIds, setEventTravelerIds] = useState<string[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isGeocoding, setIsGeocoding] = useState(false);
+  const [emailText, setEmailText] = useState('');
+  const [isParsingEmail, setIsParsingEmail] = useState(false);
+
+  const handleParseEmail = async () => {
+    if (!emailText.trim()) return;
+    setIsParsingEmail(true);
+    setErrorMsg('');
+    try {
+      const res = await fetch('/api/parse-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          emailText,
+          tripDestination: trip.destination,
+          category
+        })
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        const d = data.data;
+        if (d.title) setTitle(d.title);
+        if (d.startDateTimeLocal) setStartDateTimeLocal(d.startDateTimeLocal);
+        if (d.endDateTimeLocal) setEndDateTimeLocal(d.endDateTimeLocal);
+        if (d.locationName) setLocationName(d.locationName);
+        if (d.address) setAddress(d.address);
+        if (d.reservationNumber) setReservationNumber(d.reservationNumber);
+        if (d.notes) setNotes(d.notes);
+        setEmailText('');
+      } else {
+        setErrorMsg(data.error || 'Failed to parse email');
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to parse email');
+    } finally {
+      setIsParsingEmail(false);
+    }
+  };
+
+  const geocodeLocation = async (locName: string, addr: string): Promise<{ lat: number; lng: number } | null> => {
+    const queries: string[] = [];
+    if (addr && locName) queries.push(`${locName}, ${addr}`);
+    if (addr) queries.push(`${addr}, ${trip.destination}`);
+    if (locName) queries.push(`${locName}, ${trip.destination}`);
+    if (locName) queries.push(locName);
+
+    for (const q of queries) {
+      try {
+        const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}&limit=1`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success && json.data && json.data.length > 0) {
+            return {
+              lat: parseFloat(json.data[0].lat),
+              lng: parseFloat(json.data[0].lon)
+            };
+          }
+        }
+      } catch (err) {
+        console.error("Geocoding failed for:", q, err);
+      }
+    }
+    return null;
+  };
+
+  const handleAutoGeocode = async () => {
+    if (!locationName.trim()) {
+      alert("Please enter a Location Name first.");
+      return;
+    }
+    setIsGeocoding(true);
+    const coords = await geocodeLocation(locationName, address);
+    setIsGeocoding(false);
+    if (coords) {
+      setLat(coords.lat.toString());
+      setLng(coords.lng.toString());
+    } else {
+      alert(`Could not automatically find coordinates for "${locationName}". You can enter them manually if you'd like.`);
+    }
+  };
 
   // Detect user timezone to pre-populate or fallback to trip destination timezone
   useEffect(() => {
@@ -87,12 +168,13 @@ const [isModalOpen, setIsModalOpen] = useState(false);
     }
   }, [trip.destination]);
 
-  // Sync / listen to events for the selected day from the flat collection
+  // Sync / listen to events for the selected day from the flat collection (or all stays & flights)
   useEffect(() => {
     if (!trip.id || !selectedDayId || !days.length) return;
 
+    const isStaysFlights = selectedDayId === 'stays-flights';
     const currentDay = days.find(d => d.id === selectedDayId);
-    if (!currentDay) return;
+    if (!currentDay && !isStaysFlights) return;
 
     const eventsRef = collection(db, `trips/${trip.id}/events`);
 
@@ -100,13 +182,19 @@ const [isModalOpen, setIsModalOpen] = useState(false);
       const items: ItineraryEvent[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
-        if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
-          items.push({ id: doc.id, ...data } as ItineraryEvent);
+        if (isStaysFlights) {
+          if (data.category === 'stay' || data.category === 'travel') {
+            items.push({ id: doc.id, ...data } as ItineraryEvent);
+          }
+        } else {
+          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
+          if (currentDay && startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
+            items.push({ id: doc.id, ...data } as ItineraryEvent);
+          }
         }
       });
       // Sort chronologically by startDateTime
-      items.sort((a, b) => a.startDateTime.localeCompare(b.startDateTime));
+      items.sort((a, b) => (a.startDateTime || '').localeCompare(b.startDateTime || ''));
       setEvents(items);
     }, (err) => {
       console.error("Error listening to events:", err);
@@ -121,8 +209,11 @@ const [isModalOpen, setIsModalOpen] = useState(false);
     if (userRole === 'viewer') return;
     setEditingEvent(null);
     setTitle('');
-    setCategory('activity');
-    const currentDay = days.find(d => d.id === selectedDayId);
+    
+    const isStaysFlights = selectedDayId === 'stays-flights';
+    setCategory(isStaysFlights ? 'stay' : 'activity');
+    
+    const currentDay = isStaysFlights ? days[0] : days.find(d => d.id === selectedDayId);
     const dateStr = currentDay ? currentDay.dateStr : new Date().toISOString().split('T')[0];
     setStartDateTimeLocal(`${dateStr}T09:00`);
     setEndDateTimeLocal(`${dateStr}T10:00`);
@@ -198,9 +289,19 @@ const [isModalOpen, setIsModalOpen] = useState(false);
       return;
     }
 
+    setIsSaving(true);
     try {
-      const parsedLat = parseFloat(lat);
-      const parsedLng = parseFloat(lng);
+      let finalLat = parseFloat(lat);
+      let finalLng = parseFloat(lng);
+
+      if (isNaN(finalLat) || isNaN(finalLng)) {
+        // Automatically attempt to geocode
+        const autoCoords = await geocodeLocation(locationName, address);
+        if (autoCoords) {
+          finalLat = autoCoords.lat;
+          finalLng = autoCoords.lng;
+        }
+      }
 
       const startLocal = DateTime.fromFormat(startDateTimeLocal, "yyyy-MM-dd'T'HH:mm", { zone: timezone });
       const endLocal = DateTime.fromFormat(endDateTimeLocal, "yyyy-MM-dd'T'HH:mm", { zone: timezone });
@@ -230,8 +331,8 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         updatedAt: new Date().toISOString(),
       };
 
-      if (!isNaN(parsedLat) && !isNaN(parsedLng)) {
-        eventData.coordinates = { lat: parsedLat, lng: parsedLng };
+      if (!isNaN(finalLat) && !isNaN(finalLng)) {
+        eventData.coordinates = { lat: finalLat, lng: finalLng };
       }
 
       if (editingEvent) {
@@ -268,6 +369,8 @@ const [isModalOpen, setIsModalOpen] = useState(false);
     } catch (e: any) {
       console.error("Error saving event:", e);
       setErrorMsg(e.message || 'Error saving event');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -327,6 +430,22 @@ const [isModalOpen, setIsModalOpen] = useState(false);
 
       {/* Days Scroller */}
       <div className="flex gap-2 overflow-x-auto py-3 border-b border-slate-100 scrollbar-none" id="days-tabs">
+        {days.length > 0 && (
+          <button
+            onClick={() => onSelectDay('stays-flights')}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition flex flex-col items-center justify-center ${
+              selectedDayId === 'stays-flights'
+                ? 'bg-emerald-600 border-emerald-600 text-white shadow-md shadow-emerald-100'
+                : 'bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100'
+            }`}
+          >
+            <div className="font-bold">🏨 Stays & Flights</div>
+            <div className={`text-[9px] ${selectedDayId === 'stays-flights' ? 'text-emerald-100' : 'text-emerald-600'} mt-0.5`}>
+              All bookings
+            </div>
+          </button>
+        )}
+
         {days.length === 0 ? (
           <div className="text-xs text-slate-400 font-medium py-2 px-1">
             No dates set yet. Click <b>Edit Trip</b> above to set dates.
@@ -421,19 +540,25 @@ const [isModalOpen, setIsModalOpen] = useState(false);
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Compass className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
                 <h4 className="font-display font-bold text-sm text-slate-800">
-                  {events.length === 0 ? 'No Stops Planned Yet' : 'No Stops for this Traveler'}
+                  {selectedDayId === 'stays-flights' 
+                    ? 'No Stays or Flights Logged' 
+                    : events.length === 0 
+                      ? 'No Stops Planned Yet' 
+                      : 'No Stops for this Traveler'}
                 </h4>
                 <p className="text-xs text-slate-400 max-w-xs mt-1.5">
-                  {events.length === 0 
-                    ? 'Select our AI travel copilot panel to curate a custom itinerary with a single wizard-wizard flow!'
-                    : 'This traveler has no specific assignments on any stops for this day.'}
+                  {selectedDayId === 'stays-flights'
+                    ? 'Add accommodation locations (hotels, stays) or transit flights using the Add Stop button!'
+                    : events.length === 0 
+                      ? 'Select our AI travel copilot panel to curate a custom itinerary with a single wizard-wizard flow!'
+                      : 'This traveler has no specific assignments on any stops for this day.'}
                 </p>
                 {events.length === 0 && userRole !== 'viewer' && (
                   <button 
                     onClick={openAddModal}
                     className="mt-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-lg border border-slate-200 transition"
                   >
-                    Add Custom Stop
+                    {selectedDayId === 'stays-flights' ? 'Add Stay / Flight' : 'Add Custom Stop'}
                   </button>
                 )}
               </div>
@@ -451,12 +576,18 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                   const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${mapsSearchQuery}`;
                   const appleMapsUrl = `maps://?q=${mapsSearchQuery}`;
 
+                  const nextEvent = filteredEvents[index + 1];
+                  let showTransit = false;
+                  if (nextEvent && event.locationName && nextEvent.locationName && event.locationName.trim() !== nextEvent.locationName.trim()) {
+                    showTransit = true;
+                  }
+
                   return (
+                    <React.Fragment key={event.id}>
                     <motion.div 
                       initial={{ opacity: 0, x: -5 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ delay: index * 0.05 }}
-                      key={event.id}
                       className="relative group bg-white border border-slate-100 hover:border-slate-200/80 rounded-xl p-4 shadow-sm hover:shadow-md transition"
                     >
                       {/* Category icon node on timeline line */}
@@ -618,6 +749,29 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                         </div>
                       </div>
                     </motion.div>
+                    
+                    {showTransit && (
+                      <div className="relative pl-2 py-2 flex items-center gap-3 opacity-80 hover:opacity-100 transition">
+                        <div className="absolute -left-[15px] top-1/2 -translate-y-1/2 h-4 w-4 bg-slate-100 border-2 border-white rounded-full flex items-center justify-center">
+                          <Plane className="h-2 w-2 text-slate-400" />
+                        </div>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-2 border border-dashed border-slate-200 rounded-lg px-3 py-2 w-full">
+                          <span className="flex items-center gap-1 text-slate-500 truncate max-w-[200px]">
+                            <MapPin className="h-3 w-3 text-slate-400 shrink-0" /> Transit to {nextEvent.locationName}
+                          </span>
+                          <span className="flex-1 border-b border-dashed border-slate-200 h-px hidden sm:block"></span>
+                          <a 
+                            href={`https://www.google.com/maps/dir/?api=1&origin=${mapsSearchQuery}&destination=${encodeURIComponent(`${nextEvent.locationName} ${nextEvent.address || ''}`)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-500 hover:text-indigo-600 transition flex items-center gap-1 shrink-0"
+                          >
+                            <Globe className="h-3 w-3" /> Get Directions
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                    </React.Fragment>
                   );
                 })}
               </div>
@@ -629,7 +783,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
       {/* EVENT ADD/EDIT MODAL */}
       <AnimatePresence>
         {isModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -684,6 +838,35 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                     </select>
                   </div>
                 </div>
+
+                {(category === 'stay' || category === 'travel') && (
+                  <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-indigo-800">
+                      <Sparkles className="w-4 h-4 text-indigo-600" />
+                      <label className="text-xs font-bold uppercase tracking-wider">AI Email Parser</label>
+                    </div>
+                    <p className="text-[10px] text-indigo-600/80 mb-1">
+                      Paste your booking confirmation email text below and we'll auto-fill the details for you!
+                    </p>
+                    <div className="flex gap-2">
+                      <textarea
+                        rows={3}
+                        value={emailText}
+                        onChange={(e) => setEmailText(e.target.value)}
+                        placeholder={`Paste your ${category === 'stay' ? 'hotel' : 'flight'} confirmation email...`}
+                        className="flex-1 px-3 py-2 border border-indigo-200 rounded-lg text-xs outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition resize-none bg-white/50 backdrop-blur-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleParseEmail}
+                        disabled={isParsingEmail || !emailText.trim()}
+                        className="self-end px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition shadow-sm"
+                      >
+                        {isParsingEmail ? 'Parsing...' : 'Auto-fill'}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="flex flex-col gap-1">
@@ -745,27 +928,38 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Latitude (Optional Map Placement)</label>
-                    <input 
-                      type="text" 
-                      placeholder="e.g. 34.8519"
-                      value={lat}
-                      onChange={(e) => setLat(e.target.value)}
-                      className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition font-mono"
-                    />
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Map Coordinates</label>
+                    <button
+                      type="button"
+                      onClick={handleAutoGeocode}
+                      disabled={isGeocoding || !locationName.trim()}
+                      className="text-[10px] text-indigo-600 hover:text-indigo-700 font-bold flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded-lg transition disabled:opacity-50 cursor-pointer"
+                    >
+                      {isGeocoding ? "🔍 Finding..." : "📍 Auto-Detect"}
+                    </button>
                   </div>
+                  <div className="grid grid-cols-2 gap-4 mt-1">
+                    <div className="flex flex-col gap-1">
+                      <input 
+                        type="text" 
+                        placeholder="Latitude (e.g. 34.8519)"
+                        value={lat}
+                        onChange={(e) => setLat(e.target.value)}
+                        className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition font-mono"
+                      />
+                    </div>
 
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Longitude (Optional Map Placement)</label>
-                    <input 
-                      type="text" 
-                      placeholder="e.g. -111.7874"
-                      value={lng}
-                      onChange={(e) => setLng(e.target.value)}
-                      className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition font-mono"
-                    />
+                    <div className="flex flex-col gap-1">
+                      <input 
+                        type="text" 
+                        placeholder="Longitude (e.g. -111.7874)"
+                        value={lng}
+                        onChange={(e) => setLng(e.target.value)}
+                        className="px-3 py-2 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition font-mono"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -874,16 +1068,25 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                 <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100">
                   <button
                     type="button"
+                    disabled={isSaving || isGeocoding}
                     onClick={() => setIsModalOpen(false)}
-                    className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition"
+                    className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition disabled:opacity-50"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition"
+                    disabled={isSaving || isGeocoding}
+                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
                   >
-                    Save Stop
+                    {isSaving ? (
+                      <>
+                        <div className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      "Save Stop"
+                    )}
                   </button>
                 </div>
               </form>

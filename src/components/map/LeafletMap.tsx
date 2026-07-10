@@ -37,15 +37,60 @@ function MapBoundsRecenter({ points }: { points: [number, number][] }) {
   return null;
 }
 
+// Custom map helper to center on destination city
+function MapDestinationRecenter({ center }: { center: [number, number] | null }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!center) return;
+    map.setView(center, 12, { animate: true });
+  }, [center, map]);
+
+  return null;
+}
+
 export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProps) {
   const [dayEvents, setDayEvents] = useState<ItineraryEvent[]>([]);
+  const [destinationCenter, setDestinationCenter] = useState<[number, number] | null>(null);
 
-  // 1. Fetch events with coordinates for this specific day
+  // Geocode destination city on mount or change
+  useEffect(() => {
+    if (!trip.destination) return;
+
+    const cacheKey = `destination_coords_${trip.destination.toLowerCase()}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        setDestinationCenter([parsed.lat, parsed.lng]);
+        return;
+      } catch (e) {}
+    }
+
+    const fetchDestCoords = async () => {
+      try {
+        const res = await fetch(`/api/geocode?q=${encodeURIComponent(trip.destination)}&limit=1`);
+        const json = await res.json();
+        if (json.success && json.data && json.data.length > 0) {
+          const lat = parseFloat(json.data[0].lat);
+          const lng = parseFloat(json.data[0].lon);
+          setDestinationCenter([lat, lng]);
+          localStorage.setItem(cacheKey, JSON.stringify({ lat, lng }));
+        }
+      } catch (err) {
+        console.error("Error geocoding destination:", err);
+      }
+    };
+    fetchDestCoords();
+  }, [trip.destination]);
+
+  // 1. Fetch events with coordinates for this specific day (or all stays & flights)
   useEffect(() => {
     if (!trip.id || !selectedDayId || !days.length) return;
 
+    const isStaysFlights = selectedDayId === 'stays-flights';
     const currentDay = days.find(d => d.id === selectedDayId);
-    if (!currentDay) return;
+    if (!currentDay && !isStaysFlights) return;
 
     const eventsRef = collection(db, `trips/${trip.id}/events`);
 
@@ -54,14 +99,20 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
       snapshot.forEach((doc) => {
         const data = doc.data();
         if (data.coordinates && typeof data.coordinates.lat === 'number' && typeof data.coordinates.lng === 'number') {
-          const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
-          if (startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
-            list.push({ id: doc.id, ...data } as ItineraryEvent);
+          if (isStaysFlights) {
+            if (data.category === 'stay' || data.category === 'travel') {
+              list.push({ id: doc.id, ...data } as ItineraryEvent);
+            }
+          } else {
+            const startLocal = DateTime.fromISO(data.startDateTime).setZone(data.timezone || inferTimezone(trip.destination));
+            if (currentDay && startLocal.toFormat('yyyy-MM-dd') === currentDay.dateStr) {
+              list.push({ id: doc.id, ...data } as ItineraryEvent);
+            }
           }
         }
       });
       // Sort chronologically by startDateTime
-      list.sort((a, b) => a.startDateTime.localeCompare(b.startDateTime));
+      list.sort((a, b) => (a.startDateTime || '').localeCompare(b.startDateTime || ''));
       setDayEvents(list);
     }, (err) => {
       console.error("Error fetching map coordinates:", err);
@@ -138,17 +189,21 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
 
       <div className="flex-1 min-h-[300px] relative rounded-xl overflow-hidden border border-slate-100">
         {coordinates.length === 0 ? (
-          <div className="absolute inset-0 z-30 bg-slate-50 flex flex-col items-center justify-center p-6 text-center">
-            <Navigation className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
-            <h4 className="font-display font-bold text-sm text-slate-800">Map Visualization Ready</h4>
-            <p className="text-xs text-slate-400 max-w-xs mt-1.5">
-              Add stops with exact coordinates to view real-time paths, custom category pins, and trip-bounds centered instantly!
-            </p>
+          <div className="absolute bottom-4 left-4 right-4 z-[450] bg-white/95 backdrop-blur-sm border border-slate-100 rounded-xl p-3 shadow-md flex items-center gap-3">
+            <div className="h-8 w-8 rounded-full bg-indigo-50 flex items-center justify-center shrink-0">
+              <Navigation className="h-4.5 w-4.5 text-indigo-500 animate-pulse" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h4 className="font-display font-bold text-xs text-slate-800 leading-tight">Map Centered on {trip.destination}</h4>
+              <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                Stops on this day do not have map coordinates yet. They will auto-detect as you save!
+              </p>
+            </div>
           </div>
         ) : null}
 
         <MapContainer 
-          center={coordinates[0] || defaultCenter} 
+          center={coordinates[0] || destinationCenter || defaultCenter} 
           zoom={12} 
           scrollWheelZoom={true}
           style={{ height: '100%', width: '100%' }}
@@ -157,6 +212,8 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
+
+          {coordinates.length === 0 && <MapDestinationRecenter center={destinationCenter} />}
 
           {/* Render polyline connections between stops */}
           {polylineSegments.map((seg, idx) => (

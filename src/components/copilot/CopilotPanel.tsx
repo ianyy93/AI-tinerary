@@ -44,6 +44,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     logistics: [],
   });
   const [currentSuggestions, setCurrentSuggestions] = useState<any[]>([]);
+  const [activeStepPrompt, setActiveStepPrompt] = useState('');
+  const [customDayPrompt, setCustomDayPrompt] = useState('');
 
   // Action states
   const [isExecutingAction, setIsExecutingAction] = useState(false);
@@ -187,8 +189,21 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           startDate: trip.startDate,
           endDate: trip.endDate,
           previousData: wizardData,
+          customPrompt: activeStepPrompt,
         }),
       });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        let errMsg = `Server error (${response.status})`;
+        try {
+          const parsed = JSON.parse(errText);
+          errMsg = parsed.error || errMsg;
+        } catch {
+          if (errText && errText.length < 200) errMsg = errText;
+        }
+        throw new Error(errMsg);
+      }
 
       const res = await response.json();
       if (res.success && Array.isArray(res.data)) {
@@ -199,7 +214,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       }
     } catch (e: any) {
       console.error(e);
-      alert('Error communicating with Gemini travel Copilot.');
+      alert(e.message || 'Error communicating with Gemini travel Copilot.');
     } finally {
       setIsGenerating(false);
     }
@@ -222,6 +237,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       [key]: currentSuggestions,
     }));
 
+    setActiveStepPrompt('');
+
     if (stepNum < 6) {
       setActiveStep(stepNum + 1);
       // Automatically generate next step's suggestions for smoother wizard UX
@@ -229,6 +246,35 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     } else {
       // Finished all steps
       setActiveStep(7); // Show assembly completion view!
+    }
+  };
+
+  // 2b. Skip step and proceed
+  const handleSkipStep = (stepNum: number) => {
+    const keyMap: Record<number, string> = {
+      1: 'stays',
+      2: 'morning',
+      3: 'afternoon',
+      4: 'evening',
+      5: 'dining',
+      6: 'logistics',
+    };
+
+    const key = keyMap[stepNum];
+    setWizardData((prev: any) => ({
+      ...prev,
+      [key]: [],
+    }));
+
+    setActiveStepPrompt('');
+    setCurrentSuggestions([]);
+
+    if (stepNum < 6) {
+      setActiveStep(stepNum + 1);
+      // Automatically generate next step's suggestions for smoother wizard UX
+      handleGenerateStep(stepNum + 1);
+    } else {
+      setActiveStep(7);
     }
   };
 
@@ -405,7 +451,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     setProposedChanges(prev => prev.filter((_, i) => i !== index));
   };
   // 4. Interactive Day-by-Day Copilot Actions
-  const handleCopilotAction = (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
+  const handleCopilotAction = (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan' | 'custom') => {
     if (isQuotaReached) {
       alert("AI daily quota limit reached. Please come back tomorrow.");
       return;
@@ -427,7 +473,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     }, 400);
   };
 
-  const executeCopilotAction = async (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan') => {
+  const executeCopilotAction = async (action: 'reorder' | 'connection-check' | 'dog-friendly' | 'replan' | 'custom') => {
     try {
       const currentDay = days.find(d => d.id === selectedDayId);
       if (!currentDay) {
@@ -443,28 +489,30 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
       const currentSignature = calculateInputSignature(dayEvents);
       const cacheKey = `aitinerary_cache_${trip.id}_${selectedDayId}_${action}`;
 
-      // Check Cache FIRST: skip API call if nothing has changed
-      const cacheStr = localStorage.getItem(cacheKey);
-      if (cacheStr) {
-        try {
-          const cache = JSON.parse(cacheStr);
-          if (cache.inputSignature === currentSignature) {
-            console.log(`Cache HIT for action: ${action} on day: ${selectedDayId}`);
-            setActionResponse(cache.advice || '');
-            setProposedChanges(cache.proposedChanges || []);
-            setIsCached(true);
-            setIsExecutingAction(false);
-            // Save last active action for restoration on reload/reopen
-            localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
-            return;
+      // Check Cache FIRST: skip API call if nothing has changed (ignore for custom prompt since it varies)
+      if (action !== 'custom') {
+        const cacheStr = localStorage.getItem(cacheKey);
+        if (cacheStr) {
+          try {
+            const cache = JSON.parse(cacheStr);
+            if (cache.inputSignature === currentSignature) {
+              console.log(`Cache HIT for action: ${action} on day: ${selectedDayId}`);
+              setActionResponse(cache.advice || '');
+              setProposedChanges(cache.proposedChanges || []);
+              setIsCached(true);
+              setIsExecutingAction(false);
+              // Save last active action for restoration on reload/reopen
+              localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
+              return;
+            }
+          } catch (e) {
+            console.error("Cache parsing error:", e);
           }
-        } catch (e) {
-          console.error("Cache parsing error:", e);
         }
       }
 
       // Cache MISS: call API
-      console.log(`Cache MISS for action: ${action}. Making live API call...`);
+      console.log(`Cache MISS or Custom Prompt for action: ${action}. Making live API call...`);
       const response = await fetch('/api/copilot/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -472,8 +520,21 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           action,
           currentEvents: dayEvents,
           tripDetails: { destination: trip.destination },
+          customPrompt: action === 'custom' ? customDayPrompt : undefined,
         }),
       });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        let errMsg = `Server error (${response.status})`;
+        try {
+          const parsed = JSON.parse(errText);
+          errMsg = parsed.error || errMsg;
+        } catch {
+          if (errText && errText.length < 200) errMsg = errText;
+        }
+        throw new Error(errMsg);
+      }
 
       const res = await response.json();
       if (res.success) {
@@ -484,14 +545,18 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
         setProposedChanges(changes);
         setIsCached(false);
 
-        // Store in cache
-        const cacheData = {
-          inputSignature: currentSignature,
-          advice,
-          proposedChanges: changes,
-        };
-        localStorage.setItem(cacheKey, JSON.stringify(cacheData));
-        localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
+        if (action === 'custom') {
+          setCustomDayPrompt('');
+        } else {
+          // Store in cache for non-custom actions
+          const cacheData = {
+            inputSignature: currentSignature,
+            advice,
+            proposedChanges: changes,
+          };
+          localStorage.setItem(cacheKey, JSON.stringify(cacheData));
+          localStorage.setItem(`aitinerary_last_action_${trip.id}_${selectedDayId}`, action);
+        }
 
         incrementAiUsage();
       } else {
@@ -605,18 +670,36 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                     <p className="text-[10px] text-slate-400 mt-0.5">{WIZARD_STEPS[activeStep - 1].desc}</p>
                   </div>
 
+                  {/* Custom preference input */}
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[9px] font-medium text-slate-400">Custom Preference (Optional)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g., 'boutique hotel only', 'vegetarian friendly'"
+                      value={activeStepPrompt}
+                      onChange={(e) => setActiveStepPrompt(e.target.value)}
+                      className="text-xs bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
                   {isGenerating ? (
                     <div className="flex flex-col items-center justify-center py-6 gap-2 text-slate-400">
                       <div className="h-6 w-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
                       <span className="text-[10px] font-mono">Consulting local databases...</span>
                     </div>
                   ) : currentSuggestions.length === 0 ? (
-                    <div className="text-center py-4">
+                    <div className="flex gap-2">
                       <button
                         onClick={() => handleGenerateStep(activeStep)}
-                        className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-[10px] font-bold"
+                        className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold"
                       >
                         Load Suggestions
+                      </button>
+                      <button
+                        onClick={() => handleSkipStep(activeStep)}
+                        className="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-[10px] font-bold"
+                      >
+                        Skip Step
                       </button>
                     </div>
                   ) : (
@@ -640,10 +723,17 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                     <div className="flex gap-2 mt-2">
                       <button
                         onClick={() => handleGenerateStep(activeStep)}
-                        className="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-[10px] font-bold flex items-center justify-center gap-1"
+                        className="py-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded text-[10px] font-bold flex items-center justify-center gap-1"
+                        title="Regenerate with current preferences"
                       >
                         <RotateCcw className="h-3 w-3" />
                         Regenerate
+                      </button>
+                      <button
+                        onClick={() => handleSkipStep(activeStep)}
+                        className="py-1.5 px-3 bg-slate-800 hover:bg-slate-700 rounded text-[10px] font-bold flex items-center justify-center"
+                      >
+                        Skip
                       </button>
                       <button
                         onClick={() => handleAcceptStep(activeStep)}
@@ -695,12 +785,35 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                     key={action.id}
                     onClick={() => handleCopilotAction(action.id as any)}
                     disabled={isExecutingAction || !selectedDayId}
-                    className="py-2 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-[11px] font-bold border border-slate-700/60 transition"
+                    className="py-2 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-[11px] font-bold border border-slate-700/60 transition cursor-pointer"
                   >
                     {action.label}
                   </button>
                 );
               })}
+            </div>
+
+            {/* Custom Day Instruction / Prompt Input */}
+            <div className="mt-1 flex flex-col gap-1.5">
+              <label className="text-[9px] font-medium text-slate-400">Custom Day Instruction / Prompt</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="e.g. 'Add a coffee shop stop at 3pm', 'remove all hiking'"
+                  value={customDayPrompt}
+                  onChange={(e) => setCustomDayPrompt(e.target.value)}
+                  disabled={isExecutingAction || !selectedDayId}
+                  className="flex-1 text-xs bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                />
+                <button
+                  onClick={() => handleCopilotAction('custom')}
+                  disabled={isExecutingAction || !selectedDayId || !customDayPrompt.trim()}
+                  className="px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  Apply
+                </button>
+              </div>
             </div>
           </div>
 
