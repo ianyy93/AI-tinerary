@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper to check if user is logged in
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Helper to check if user has access to a specific trip document
+    function hasTripAccess(tripData) {
+      return isSignedIn() && (
+        tripData.userId == request.auth.uid ||
+        (request.auth.uid in tripData.collaboratorUids) ||
+        (request.auth.token.email != null && request.auth.token.email in tripData.collaboratorEmails)
+      );
+    }
+
+    match /trips/{tripId} {
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow read: if hasTripAccess(resource.data);
+      allow update: if hasTripAccess(resource.data);
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      // Days Subcollection
+      match /days/{dayId} {
+        allow read, write: if isSignedIn() && (
+          get(/databases/$(database)/documents/trips/$(tripId)).data.userId == request.auth.uid ||
+          request.auth.uid in get(/databases/$(database)/documents/trips/$(tripId)).data.collaboratorUids ||
+          (request.auth.token.email != null && request.auth.token.email in get(/databases/$(database)/documents/trips/$(tripId)).data.collaboratorEmails)
+        );
+        
+        // Events Subcollection
+        match /events/{eventId} {
+          allow read, write: if isSignedIn() && (
+            get(/databases/$(database)/documents/trips/$(tripId)).data.userId == request.auth.uid ||
+            request.auth.uid in get(/databases/$(database)/documents/trips/$(tripId)).data.collaboratorUids ||
+            (request.auth.token.email != null && request.auth.token.email in get(/databases/$(database)/documents/trips/$(tripId)).data.collaboratorEmails)
+          );
+        }
+      }
+    }
+  }
+}

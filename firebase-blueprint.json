@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "Trip": {
+      "title": "Trip",
+      "description": "Travel itinerary metadata and collaborators",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "destination": { "type": "string" },
+        "tripType": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "coverColor": { "type": "string" },
+        "petFriendly": { "type": "boolean" },
+        "status": { "type": "string" },
+        "userId": { "type": "string" },
+        "collaborators": { "type": "object" },
+        "schemaVersion": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "destination", "startDate", "endDate", "userId"]
+    },
+    "Day": {
+      "title": "Day",
+      "description": "Single day of a trip",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "dateStr": { "type": "string", "format": "date" },
+        "title": { "type": "string" }
+      },
+      "required": ["id", "dateStr", "title"]
+    },
+    "Event": {
+      "title": "Event",
+      "description": "Itinerary event or stop",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "startTime": { "type": "string" },
+        "endTime": { "type": "string" },
+        "timezone": { "type": "string" },
+        "locationName": { "type": "string" },
+        "address": { "type": "string" },
+        "notes": { "type": "string" },
+        "reservationNumber": { "type": "string" },
+        "dogFriendly": { "type": "boolean" },
+        "fileUrl": { "type": "string" },
+        "fileName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "coordinates": { "type": "object" }
+      },
+      "required": ["title", "category", "startTime", "endTime", "locationName"]
+    }
+  },
+  "firestore": {
+    "/trips/{tripId}": {
+      "schema": "Trip",
+      "description": "Trips collection"
+    },
+    "/trips/{tripId}/days/{dayId}": {
+      "schema": "Day",
+      "description": "Days subcollection under a trip"
+    },
+    "/trips/{tripId}/days/{dayId}/events/{eventId}": {
+      "schema": "Event",
+      "description": "Events/stops subcollection under a day"
+    }
+  }
+}

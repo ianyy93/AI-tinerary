@@ -1,0 +1,10 @@
+{
+  "name": "AI-tinerary",
+  "description": "High-fidelity, full-stack, multi-trip travel planner with Leaflet mapping, collaborative real-time sync, and Gemini-powered smart co-pilot.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
