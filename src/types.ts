@@ -48,6 +48,7 @@ export interface ItineraryEvent {
   fileUrl?: string; // Attachment URL or Base64
   fileName?: string;
   isAnchor?: boolean; // Sets whether this is an anchor event
+  timeUnknown?: boolean;
   travelerIds?: string[];
   source?: 'manual' | 'wizard' | 'anchor' | 'ai-suggested';
 }

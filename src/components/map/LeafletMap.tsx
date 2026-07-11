@@ -243,7 +243,7 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
                   </span>
                   <h4 className="font-display font-bold text-xs text-slate-900 mt-1 leading-tight">{event.title}</h4>
                   <p className="text-[10px] text-slate-500 mt-0.5">{event.locationName}</p>
-                  {(() => {
+                  {!event.timeUnknown && (() => {
                     const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
                     const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
                     const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');

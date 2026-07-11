@@ -47,6 +47,7 @@ const COMMON_TIMEZONES = [
 
 export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectDay, userRole }: ItineraryTimelineProps) {
   const [events, setEvents] = useState<ItineraryEvent[]>([]);
+  const [overnightMarkers, setOvernightMarkers] = useState<{start: string[], end: string[]}>({ start: [], end: [] });
     // Pending deletes
   const [pendingDeletes, setPendingDeletes] = useState<string[]>([]);
   const deleteTimeouts = useRef<{ [key: string]: NodeJS.Timeout }>({});
@@ -180,8 +181,12 @@ const [isModalOpen, setIsModalOpen] = useState(false);
 
     const unsubscribe = onSnapshot(eventsRef, (snapshot) => {
       const items: ItineraryEvent[] = [];
+      const allStays: ItineraryEvent[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
+        if (data.category === 'stay') {
+          allStays.push({ id: doc.id, ...data } as ItineraryEvent);
+        }
         if (isStaysFlights) {
           if (data.category === 'stay' || data.category === 'travel') {
             items.push({ id: doc.id, ...data } as ItineraryEvent);
@@ -193,6 +198,44 @@ const [isModalOpen, setIsModalOpen] = useState(false);
           }
         }
       });
+
+      const markers = { start: [] as string[], end: [] as string[] };
+      if (!isStaysFlights && currentDay) {
+        const staysByRes: Record<string, ItineraryEvent[]> = {};
+        allStays.forEach(stay => {
+          if (stay.reservationNumber) {
+            if (!staysByRes[stay.reservationNumber]) staysByRes[stay.reservationNumber] = [];
+            staysByRes[stay.reservationNumber].push(stay);
+          }
+        });
+
+        Object.values(staysByRes).forEach(group => {
+          if (group.length >= 2) {
+            group.sort((a, b) => (a.startDateTime || '').localeCompare(b.startDateTime || ''));
+            const checkInEvent = group[0];
+            const checkOutEvent = group[group.length - 1];
+            
+            const checkInLocal = DateTime.fromISO(checkInEvent.startDateTime).setZone(checkInEvent.timezone || inferTimezone(trip.destination));
+            const checkOutLocal = DateTime.fromISO(checkOutEvent.startDateTime).setZone(checkOutEvent.timezone || inferTimezone(trip.destination));
+            
+            const checkInDateStr = checkInLocal.toFormat('yyyy-MM-dd');
+            const checkOutDateStr = checkOutLocal.toFormat('yyyy-MM-dd');
+            
+            const hotelName = checkInEvent.locationName || checkInEvent.title.replace('Check-in: ', '').replace('Check-out: ', '');
+
+            if (currentDay.dateStr === checkInDateStr && checkInDateStr !== checkOutDateStr) {
+              markers.end.push(hotelName);
+            } else if (currentDay.dateStr > checkInDateStr && currentDay.dateStr < checkOutDateStr) {
+              markers.start.push(hotelName);
+              markers.end.push(hotelName);
+            } else if (currentDay.dateStr === checkOutDateStr && checkInDateStr !== checkOutDateStr) {
+              markers.start.push(hotelName);
+            }
+          }
+        });
+      }
+      setOvernightMarkers(markers);
+
       // Sort chronologically by startDateTime
       items.sort((a, b) => (a.startDateTime || '').localeCompare(b.startDateTime || ''));
       setEvents(items);
@@ -329,6 +372,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         fileName: fileName || '',
         travelerIds: eventTravelerIds,
         updatedAt: new Date().toISOString(),
+        timeUnknown: false,
       };
 
       if (!isNaN(finalLat) && !isNaN(finalLng)) {
@@ -536,7 +580,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
 
         return (
           <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-6" id="timeline-list">
-            {filteredEvents.length === 0 ? (
+            {filteredEvents.length === 0 && overnightMarkers.start.length === 0 && overnightMarkers.end.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Compass className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
                 <h4 className="font-display font-bold text-sm text-slate-800">
@@ -566,6 +610,21 @@ const [isModalOpen, setIsModalOpen] = useState(false);
               <div className="relative pl-6 flex flex-col gap-5">
                 {/* Timeline connection line */}
                 <div className="absolute top-2 bottom-2 left-[10px] w-0.5 bg-slate-100" />
+                {overnightMarkers.start.map((hotelName, idx) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: -5 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={`start-marker-${idx}`} 
+                    className="relative group bg-indigo-50/50 border border-indigo-100/50 rounded-xl p-3 shadow-sm flex items-center gap-3"
+                  >
+                    <div className="absolute -left-[22px] top-1/2 -translate-y-1/2 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm bg-indigo-100 text-indigo-600">
+                      <span className="text-[10px]">🌙</span>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium text-slate-700">🌙 <span className="font-bold">{hotelName}</span></p>
+                    </div>
+                  </motion.div>
+                ))}
 
                 {filteredEvents.map((event, index) => {
                   const cat = getCatConfig(event.category);
@@ -650,7 +709,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                           <h4 className="font-display font-bold text-sm text-slate-900 group-hover:text-indigo-600 transition leading-tight">
                             {event.title}
                           </h4>
-                          {(() => {
+                          {!event.timeUnknown && (() => {
                             const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
                             const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
                             const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');
@@ -774,6 +833,21 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                     </React.Fragment>
                   );
                 })}
+                {overnightMarkers.end.map((hotelName, idx) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: -5 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={`end-marker-${idx}`} 
+                    className="relative group bg-indigo-50/50 border border-indigo-100/50 rounded-xl p-3 shadow-sm flex items-center gap-3 mt-1"
+                  >
+                    <div className="absolute -left-[22px] top-1/2 -translate-y-1/2 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm bg-indigo-100 text-indigo-600">
+                      <span className="text-[10px]">🌙</span>
+                    </div>
+                    <div>
+                      <p className="text-xs font-medium text-slate-700">🌙 <span className="font-bold">{hotelName}</span></p>
+                    </div>
+                  </motion.div>
+                ))}
               </div>
             )}
           </div>

@@ -252,23 +252,46 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
       if (stepNum === 1 && acceptedItems.length > 0 && tripDays.length > 0) {
         const firstDay = tripDays[0];
+        const lastDay = tripDays[tripDays.length - 1];
         const staysColl = collection(db, `trips/${trip.id}/events`);
         for (const stay of acceptedItems) {
           const stayTz = inferTimezone(stay.locationName || trip.destination);
-          const startLocal = DateTime.fromFormat(`${firstDay.dateStr} 15:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
-          const endLocal = DateTime.fromFormat(`${firstDay.dateStr} 16:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          
+          const reservationNumber = `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
+
+          const startLocalIn = DateTime.fromFormat(`${firstDay.dateStr} 22:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          const endLocalIn = DateTime.fromFormat(`${firstDay.dateStr} 22:30`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
           await addDoc(staysColl, {
             title: `Check-in: ${stay.title}`,
             category: 'stay',
-            startDateTime: startLocal.toISO(),
-            endDateTime: endLocal.toISO(),
+            startDateTime: startLocalIn.toISO(),
+            endDateTime: endLocalIn.toISO(),
             timezone: stayTz,
             locationName: stay.locationName,
             address: stay.address,
             notes: stay.notes,
             coordinates: { lat: stay.lat, lng: stay.lng },
             dogFriendly: trip.petFriendly,
-            reservationNumber: `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`,
+            reservationNumber,
+            timeUnknown: true,
+            source: 'wizard',
+          });
+
+          const startLocalOut = DateTime.fromFormat(`${lastDay.dateStr} 08:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          const endLocalOut = DateTime.fromFormat(`${lastDay.dateStr} 08:30`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
+          await addDoc(staysColl, {
+            title: `Check-out: ${stay.title}`,
+            category: 'stay',
+            startDateTime: startLocalOut.toISO(),
+            endDateTime: endLocalOut.toISO(),
+            timezone: stayTz,
+            locationName: stay.locationName,
+            address: stay.address,
+            notes: stay.notes,
+            coordinates: { lat: stay.lat, lng: stay.lng },
+            dogFriendly: trip.petFriendly,
+            reservationNumber,
+            timeUnknown: true,
             source: 'wizard',
           });
         }

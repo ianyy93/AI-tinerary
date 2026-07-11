@@ -739,7 +739,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                         <div>
                           <div className="font-bold text-xs text-slate-850">{ev.title}</div>
                           <div className="text-[10px] text-slate-400 mt-0.5">
-                            Original Date: <span className="font-mono text-slate-500">{currentEventDate}</span> at {currentEventTime}
+                            Original Date: <span className="font-mono text-slate-500">{currentEventDate}</span>{!ev.timeUnknown && ` at ${currentEventTime}`}
                           </div>
                           {ev.locationName && (
                             <div className="text-[10px] text-slate-400 mt-0.5">
