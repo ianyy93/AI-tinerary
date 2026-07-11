@@ -51,8 +51,8 @@ async function generateContentWithRetry(
   maxRetries = 3
 ): Promise<any> {
   let delay = 1000;
-  // Fallback chain: Primary -> gemini-2.5-flash -> gemini-3.1-flash-lite
-  const models = Array.from(new Set([params.model, 'gemini-2.5-flash', 'gemini-3.1-flash-lite']));
+  // Fallback chain: Primary -> gemini-3.5-flash -> gemini-1.5-flash
+  const models = Array.from(new Set([params.model, 'gemini-3.5-flash', 'gemini-1.5-flash']));
 
   for (const model of models) {
     let attempt = 0;
@@ -132,7 +132,7 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
             address: { type: Type.STRING, description: "Physical address of the venue if known or guessable" },
             notes: { type: Type.STRING, description: "Brief notes about the event" },
             lat: { type: Type.NUMBER, description: "Latitude coordinate of this location" },
-            lng: { type: Type.NUMBER, description: "Longitude coordinate of this location" },
+            lng: { type: Type.NUMBER, description: "Longitude coordinate" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." },
             isBooked: { type: Type.BOOLEAN, description: "True if the text implies this event is actually booked/confirmed (e.g. reservation numbers, 'I booked a hotel', 'got my tickets'). False if it is just a fixed date/event but not explicitly confirmed/booked yet." },
             timezone: { type: Type.STRING, description: "The IANA timezone identifier (e.g. 'America/Denver', 'Asia/Tokyo', 'Europe/Paris', 'America/New_York') inferred from the destination or location of the event." }
           },
@@ -152,7 +152,7 @@ IMPORTANT DATE RULES:
 User Text: "${anchorText}"`;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -172,7 +172,7 @@ User Text: "${anchorText}"`;
 // 1. Wizard Step API endpoint
 app.post('/api/copilot/wizard-step', async (req, res) => {
   try {
-    const { step, destination, tripType, petFriendly, startDate, endDate, previousData, customPrompt } = req.body;
+    const { step, destination, tripType, petFriendly, startDate, endDate, previousData, customPrompt, existingEvents } = req.body;
     const ai = getGeminiClient();
 
     let stepPrompt = '';
@@ -183,9 +183,24 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
       Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 1
     );
 
+    const contextBlock = `
+TRIP CONTEXT:
+- Destination: ${destination}
+- Dates: ${startDate} to ${endDate} (${durationDays} days)
+- Trip Type: ${tripType}
+- Pet Friendly: ${petFriendly ? 'Yes, must accommodate dogs.' : 'No.'}
+- Existing Itinerary Events (Anchors): ${existingEvents && existingEvents.length > 0 ? JSON.stringify(existingEvents) : 'None yet.'}
+- Previous Copilot Suggestions: ${previousData ? JSON.stringify(previousData) : 'None yet.'}
+`;
+
     if (step === 1) {
       // Step 1: Accommodations/Stays
-      stepPrompt = `Suggest 2 gorgeous hotel, resort, or accommodation options for a ${durationDays}-day trip to ${destination}. The trip type is ${tripType}${petFriendly ? ' and it must be pet-friendly (dog-friendly) with details on why.' : ''}. Give details about the vibe, visual style, and highlight custom reservation notes.`;
+      stepPrompt = `${contextBlock}
+TASK: Suggest 2 gorgeous hotel, resort, or accommodation options for this trip.
+CONSTRAINTS:
+1. Provide options with great vibes and visual style (e.g., boutique, luxury, or unique local stays).
+2. Do NOT specify check-in or check-out times; leave them untimed or use broad descriptions.
+3. If pet-friendly, explicitly mention the pet amenities or nearby dog parks.`;
       responseSchema = {
         type: Type.ARRAY,
         description: "List of recommended accommodations",
@@ -197,14 +212,19 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
             address: { type: Type.STRING, description: "Detailed physical address (real or highly realistic)" },
             notes: { type: Type.STRING, description: "Why we chose this, what makes it special, and any pet-friendly amenities if applicable" },
             lat: { type: Type.NUMBER, description: "Latitude coordinate of this location" },
-            lng: { type: Type.NUMBER, description: "Longitude coordinate of this location" }
+            lng: { type: Type.NUMBER, description: "Longitude coordinate" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." }
           },
           required: ["title", "locationName", "address", "notes", "lat", "lng"]
         }
       };
     } else if (step === 2) {
       // Step 2: Morning Activities
-      stepPrompt = `Suggest exactly 1 spectacular morning activity per day for a ${durationDays}-day trip to ${destination}. The trip type is ${tripType}.${petFriendly ? ' Focus on outdoor or dog-friendly spots and sights.' : ''} Keep the start time around 09:00 and end around 12:00. Previous stays selected: ${JSON.stringify(previousData?.stays || [])}`;
+      stepPrompt = `${contextBlock}
+TASK: Suggest exactly 1 spectacular morning activity per day.
+CONSTRAINTS:
+1. Schedule between 09:00 and 12:00.
+2. Avoid scheduling conflicts with any existing morning events (anchors) provided in the context.
+3. Focus on active exploration, hikes, or iconic historical sights.`;
       responseSchema = {
         type: Type.ARRAY,
         description: "Morning activities list",
@@ -219,14 +239,19 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
             address: { type: Type.STRING, description: "Physical address" },
             notes: { type: Type.STRING, description: "Tips, packing advice, or dog-friendly notes if applicable" },
             lat: { type: Type.NUMBER, description: "Latitude coordinate" },
-            lng: { type: Type.NUMBER, description: "Longitude coordinate" }
+            lng: { type: Type.NUMBER, description: "Longitude coordinate" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." }
           },
           required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng"]
         }
       };
     } else if (step === 3) {
       // Step 3: Afternoon Activities
-      stepPrompt = `Suggest exactly 1 incredible afternoon activity or sight per day for a ${durationDays}-day trip to ${destination}. The trip type is ${tripType}.${petFriendly ? ' Must be dog-friendly.' : ''} Schedule this around 14:00 to 17:00. Integrate with these morning activities: ${JSON.stringify(previousData?.morningActivities || [])}`;
+      stepPrompt = `${contextBlock}
+TASK: Suggest exactly 1 incredible afternoon activity or sight per day.
+CONSTRAINTS:
+1. Schedule between 14:00 and 17:00.
+2. Ensure realistic travel times from the morning activities and avoid conflicts with existing afternoon anchor events.
+3. Focus on art centers, leisure walks, shopping, or local secrets.`;
       responseSchema = {
         type: Type.ARRAY,
         description: "Afternoon activities list",
@@ -241,14 +266,19 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
             address: { type: Type.STRING, description: "Physical address" },
             notes: { type: Type.STRING, description: "Afternoon details, entry fees, or dog policies" },
             lat: { type: Type.NUMBER, description: "Latitude" },
-            lng: { type: Type.NUMBER, description: "Longitude" }
+            lng: { type: Type.NUMBER, description: "Longitude" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." }
           },
           required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng"]
         }
       };
     } else if (step === 4) {
       // Step 4: Evening Activities
-      stepPrompt = `Suggest exactly 1 evening wind-down activity, sunset point, or cozy leisure spot per day for a ${durationDays}-day trip to ${destination}. Schedule around 18:30 to 21:00. ${petFriendly ? 'Must be pet friendly.' : ''} Keep in mind these previous choices: ${JSON.stringify(previousData || {})}`;
+      stepPrompt = `${contextBlock}
+TASK: Suggest exactly 1 evening wind-down activity, sunset point, or cozy leisure spot per day.
+CONSTRAINTS:
+1. Schedule between 18:30 and 21:00.
+2. Avoid conflicts with existing evening anchor events.
+3. Focus on scenic viewpoints, twilight strolls, or relaxing lounges.`;
       responseSchema = {
         type: Type.ARRAY,
         description: "Evening activities list",
@@ -263,36 +293,66 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
             address: { type: Type.STRING, description: "Physical address" },
             notes: { type: Type.STRING, description: "Why this sunset/spot is magical" },
             lat: { type: Type.NUMBER, description: "Latitude" },
-            lng: { type: Type.NUMBER, description: "Longitude" }
+            lng: { type: Type.NUMBER, description: "Longitude" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." }
           },
           required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng"]
         }
       };
     } else if (step === 5) {
-      // Step 5: Dining & Food
-      stepPrompt = `Suggest 2 high-quality local dining recommendations (e.g., one Lunch around 12:30, one Dinner around 19:30) per day for a ${durationDays}-day trip to ${destination}. ${petFriendly ? 'Both dining spots must feature outdoor dog-friendly patios.' : ''} Current plan overview: ${JSON.stringify(previousData || {})}`;
+      // Step 5: Dining & Food (Pending events with 2-3 options each)
+      stepPrompt = `${contextBlock}
+TASK: Suggest 2 high-quality local dining recommendations (one Lunch slot around 12:30, one Dinner slot around 19:30) per day.
+Each recommended slot MUST be returned as a pending event (status: 'pending') that carries an array of 2-3 distinct local restaurant choices.
+
+CONSTRAINTS:
+1. The title of each slot MUST indicate it is a slot with choice (e.g., 'Lunch: Pick a Spot' or 'Dinner: Select Restaurant').
+2. The event MUST have status set to "pending".
+3. The event MUST contain an 'options' array with exactly 2 to 3 distinct, high-quality, authentic local restaurant recommendations.
+4. Each option in the 'options' array MUST have 'name', 'lat', 'lng', 'notes', and 'address'.
+5. If the trip is pet-friendly, ensure the options suggested have outdoor dog-friendly patios and mention this in their notes.`;
       responseSchema = {
         type: Type.ARRAY,
-        description: "Dining recommendations list",
+        description: "Dining slots as pending events with restaurant options",
         items: {
           type: Type.OBJECT,
           properties: {
             dayIndex: { type: Type.INTEGER, description: "Zero-based index of the day (0 to " + (durationDays - 1) + ")" },
-            title: { type: Type.STRING, description: "Name of restaurant recommendation (e.g., 'Lunch: Wildflower Bread Company')" },
-            startTime: { type: Type.STRING, description: "Time in HH:MM format" },
-            endTime: { type: Type.STRING, description: "Time in HH:MM format" },
-            locationName: { type: Type.STRING, description: "Restaurant Name" },
-            address: { type: Type.STRING, description: "Physical address" },
-            notes: { type: Type.STRING, description: "Recommended dish, vibe, dog patio info if applicable" },
-            lat: { type: Type.NUMBER, description: "Latitude" },
-            lng: { type: Type.NUMBER, description: "Longitude" }
+            title: { type: Type.STRING, description: "Title of the slot (e.g., 'Lunch: Choose Restaurant')" },
+            startTime: { type: Type.STRING, description: "Time in HH:MM format (e.g., '12:30')" },
+            endTime: { type: Type.STRING, description: "Time in HH:MM format (e.g., '14:00')" },
+            locationName: { type: Type.STRING, description: "Placeholder location name indicating choices (e.g., '2-3 Local Options')" },
+            address: { type: Type.STRING, description: "Placeholder address (e.g., 'To be decided')" },
+            notes: { type: Type.STRING, description: "General description of the dining plan" },
+            lat: { type: Type.NUMBER, description: "Default approximate latitude for map centering" },
+            lng: { type: Type.NUMBER, description: "Default approximate longitude for map centering" },
+            status: { type: Type.STRING, description: "Must be 'pending'" },
+            options: {
+              type: Type.ARRAY,
+              description: "The 2-3 restaurant choices for this slot",
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING, description: "Restaurant name" },
+                  lat: { type: Type.NUMBER, description: "Latitude coordinate" },
+                  lng: { type: Type.NUMBER, description: "Longitude coordinate" },
+                  notes: { type: Type.STRING, description: "Why we recommend it, signature dish, vibe, dog patio info if petFriendly is true" },
+                  address: { type: Type.STRING, description: "Restaurant physical address" }
+                },
+                required: ["name", "lat", "lng", "notes", "address"]
+              }
+            }
           },
-          required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng"]
+          required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng", "status", "options"]
         }
       };
     } else {
       // Step 6: Logistics / Travel / Extras
-      stepPrompt = `Suggest 1 logistics or travel segment per day (e.g., airport transfer on Day 1, scenic drives on mid-days, return departure logistics on the final day) for ${destination}. Trip Type is ${tripType}. Let's slot this in around the existing plan: ${JSON.stringify(previousData || {})}`;
+      stepPrompt = `${contextBlock}
+TASK: Suggest 1 logistics or travel segment per day (e.g., airport transfer on Day 1, scenic drives on mid-days, return departure logistics on the final day).
+CONSTRAINTS:
+1. Ensure they make sense with the existing itinerary and anchors.
+2. Provide practical advice or travel hacks.
+3. Keep times realistic for the route.`;
       responseSchema = {
         type: Type.ARRAY,
         description: "Logistics and travel items",
@@ -307,7 +367,7 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
             address: { type: Type.STRING, description: "Location detail" },
             notes: { type: Type.STRING, description: "Practical advice or dog rules if driving/flying" },
             lat: { type: Type.NUMBER, description: "Latitude" },
-            lng: { type: Type.NUMBER, description: "Longitude" }
+            lng: { type: Type.NUMBER, description: "Longitude" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." }
           },
           required: ["dayIndex", "title", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng"]
         }
@@ -315,19 +375,43 @@ app.post('/api/copilot/wizard-step', async (req, res) => {
     }
 
     if (customPrompt && typeof customPrompt === 'string' && customPrompt.trim()) {
-      stepPrompt += `\n\nCRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated recommendations to strongly align with and satisfy this specific prompt/request: "${customPrompt.trim()}"`;
+      stepPrompt += `
+
+CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated recommendations to strongly align with and satisfy this specific prompt/request: "${customPrompt.trim()}"`;
     }
 
-    const response = await generateContentWithRetry(ai, {
-      model: 'gemini-2.5-flash',
-      contents: stepPrompt,
-      config: {
-        systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
-        responseMimeType: 'application/json',
-        responseSchema: responseSchema,
-        temperature: 0.7,
-      },
-    });
+    let response;
+    try {
+      response = await generateContentWithRetry(ai, {
+        model: 'gemini-3.5-flash',
+        contents: stepPrompt,
+        config: {
+          systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
+          responseMimeType: 'application/json',
+          responseSchema: responseSchema,
+          temperature: 0.7,
+          tools: [{ googleSearch: {} }]
+        },
+      });
+    } catch (error: any) {
+      const errMsg = (error?.message || '').toLowerCase();
+      const code = error?.code || error?.status || 0;
+      if (errMsg.includes('quota') || errMsg.includes('exhausted') || errMsg.includes('429') || errMsg.includes('grounding') || code === 429) {
+        console.warn("Grounding failed due to quota/exhausted. Retrying without tools array.");
+        response = await generateContentWithRetry(ai, {
+          model: 'gemini-3.5-flash',
+          contents: stepPrompt,
+          config: {
+            systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
+            responseMimeType: 'application/json',
+            responseSchema: responseSchema,
+            temperature: 0.7,
+          },
+        });
+      } else {
+        throw error;
+      }
+    }
 
     res.json({ success: true, data: JSON.parse(response.text || '[]') });
   } catch (error: any) {
@@ -365,11 +449,11 @@ Use the 'advice' field to describe your logic and rationale to the user.`;
     }
 
     // Task-based model tiering: 
-    // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly) to the cheapest/fastest eligible model (gemini-3.1-flash-lite)
-    // - Reserve the premium model (gemini-2.5-flash) for more complex, less frequent calls (full-day replans or custom edits)
+    // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly) to the cheapest/fastest eligible model (gemini-1.5-flash)
+    // - Reserve the premium model (gemini-3.5-flash) for more complex, less frequent calls (full-day replans or custom edits)
     const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly')
-      ? 'gemini-3.1-flash-lite'
-      : 'gemini-2.5-flash';
+      ? 'gemini-1.5-flash'
+      : 'gemini-3.5-flash';
 
     const response = await generateContentWithRetry(ai, {
       model: modelToUse,
@@ -438,7 +522,7 @@ Return ONLY a valid JSON object matching this schema:
 Do not include any markdown formatting, backticks, or extra explanation. Just raw JSON.`;
 
         const aiResponse = await generateContentWithRetry(ai, {
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.5-flash',
           contents: prompt,
           config: {
             temperature: 0.1,
@@ -499,7 +583,7 @@ ${emailText}
 `;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         temperature: 0.1,

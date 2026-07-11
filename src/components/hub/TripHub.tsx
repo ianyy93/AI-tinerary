@@ -14,6 +14,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
 import { inferTimezone } from '../../utils/timezone';
+import { AnchorExtractionFlow } from './AnchorExtractionFlow';
 
 interface TripHubProps {
   user: UserSession;
@@ -66,16 +67,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
   const [confirmedPetFriendly, setConfirmedPetFriendly] = useState(false);
 
   // Extracted first event states
-  const [confirmedEventCategory, setConfirmedEventCategory] = useState<string>('activity');
-  const [confirmedEventTitle, setConfirmedEventTitle] = useState('');
-  const [confirmedEventDate, setConfirmedEventDate] = useState('');
-  const [confirmedEventStartTime, setConfirmedEventStartTime] = useState('10:00');
-  const [confirmedEventEndTime, setConfirmedEventEndTime] = useState('11:00');
-  const [confirmedEventLocation, setConfirmedEventLocation] = useState('');
-  const [confirmedEventAddress, setConfirmedEventAddress] = useState('');
-  const [confirmedEventNotes, setConfirmedEventNotes] = useState('');
-  const [confirmedIsBooked, setConfirmedIsBooked] = useState(true);
-
+                  
   // 1. Fetch trips for which user is a collaborator
   useEffect(() => {
     if (!user.uid) return;
@@ -303,172 +295,10 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
       setErrorMsg(e.message || 'Error creating trip');
     }
   };
-
-  // Anchor-first text extraction handler
-  const handleExtractAnchor = async () => {
-    if (!anchorText.trim()) {
-      setErrorMsg("Please enter details about your booked or fixed event.");
-      return;
-    }
-
-    try {
-      setErrorMsg('');
-      setIsExtracting(true);
-      setExtractedData(null);
-      
-      const response = await fetch('/api/copilot/extract-anchor', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ anchorText })
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to extract details from text.");
-      }
-
-      const result = await response.json();
-      if (result.success && result.data) {
-        const data = result.data;
-        setExtractedData(data);
-        
-        // Populate confirmed fields
-        setConfirmedTitle(data.title || '');
-        setConfirmedDestination(data.destination || '');
-        setConfirmedStartDate(data.startDate || '');
-        setConfirmedEndDate(data.endDate || '');
-        setConfirmedTripType('mixed');
-        setConfirmedCoverColor('bg-blue-50 border-blue-100 text-blue-700');
-        setConfirmedPetFriendly(false);
-
-        if (data.anchorEvent) {
-          setConfirmedEventCategory(data.anchorEvent.category || 'activity');
-          setConfirmedEventTitle(data.anchorEvent.title || '');
-          setConfirmedEventDate(data.anchorEvent.date || '');
-          setConfirmedEventStartTime(data.anchorEvent.startTime || '10:00');
-          setConfirmedEventEndTime(data.anchorEvent.endTime || '11:00');
-          setConfirmedEventLocation(data.anchorEvent.locationName || '');
-          setConfirmedEventAddress(data.anchorEvent.address || '');
-          setConfirmedEventNotes(data.anchorEvent.notes || '');
-          setConfirmedIsBooked(data.anchorEvent.isBooked !== false);
-        }
-      } else {
-        throw new Error(result.error || "Gemini could not parse your text. Try adding more specific dates or location info.");
-      }
-    } catch (err: any) {
-      console.error("Error during extraction:", err);
-      setErrorMsg(err.message || "An error occurred while calling the AI. Please try again.");
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
-  // Anchor-first confirm & save handler
-  const handleCreateAnchorTrip = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!confirmedTitle.trim() || !confirmedDestination.trim() || !confirmedStartDate || !confirmedEndDate) {
-      setErrorMsg('Please fill in all required trip fields.');
-      return;
-    }
-
-    if (new Date(confirmedStartDate) > new Date(confirmedEndDate)) {
-      setErrorMsg('Start date cannot be after end date.');
-      return;
-    }
-
-    if (!confirmedEventTitle.trim() || !confirmedEventLocation.trim() || !confirmedEventDate) {
-      setErrorMsg('Please fill in all required anchor event fields.');
-      return;
-    }
-
-    try {
-      setErrorMsg('');
-      const userIdentifier = user.email || user.uid;
-      const userEmail = (user.email || '').toLowerCase();
-      
-      const tripData = {
-        title: confirmedTitle,
-        destination: confirmedDestination,
-        tripType: confirmedTripType,
-        startDate: confirmedStartDate,
-        endDate: confirmedEndDate,
-        coverColor: confirmedCoverColor,
-        petFriendly: confirmedPetFriendly,
-        status: confirmedIsBooked ? 'booking' : 'upcoming',
-        userId: user.uid,
-        collaborators: {
-          [userIdentifier]: 'owner'
-        },
-        collaboratorEmails: userEmail ? [userEmail] : [],
-        collaboratorUids: [user.uid],
-        schemaVersion: 2,
-        createdAt: new Date().toISOString(),
-      };
-
-      let docRef;
-      try {
-        docRef = await addDoc(collection(db, 'trips'), tripData);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, 'trips');
-        throw err;
-      }
-
-      // Insert anchor event flat in trips/{tripId}/events
-      const eventsCollRef = collection(db, `trips/${docRef.id}/events`);
-      
-      const anchorTimezone = extractedData?.anchorEvent?.timezone || inferTimezone(confirmedEventLocation || confirmedEventAddress || confirmedDestination);
-      
-      const startLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventStartTime}`, 'yyyy-MM-dd HH:mm', { zone: anchorTimezone });
-      const endLocal = DateTime.fromFormat(`${confirmedEventDate} ${confirmedEventEndTime}`, 'yyyy-MM-dd HH:mm', { zone: anchorTimezone });
-      
-      let finalEndLocal = endLocal;
-      if (endLocal < startLocal) {
-        finalEndLocal = endLocal.plus({ days: 1 });
-      }
-
-      const eventData: any = {
-        title: confirmedEventTitle,
-        category: confirmedEventCategory,
-        startDateTime: startLocal.toISO(),
-        endDateTime: finalEndLocal.toISO(),
-        timezone: anchorTimezone,
-        locationName: confirmedEventLocation,
-        address: confirmedEventAddress || '',
-        notes: confirmedEventNotes || '',
-        reservationNumber: confirmedIsBooked ? `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}` : '',
-        dogFriendly: confirmedPetFriendly,
-        isAnchor: true,
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (extractedData?.anchorEvent?.lat !== undefined && extractedData?.anchorEvent?.lng !== undefined) {
-        eventData.coordinates = { lat: extractedData.anchorEvent.lat, lng: extractedData.anchorEvent.lng };
-      }
-
-      try {
-        await addDoc(eventsCollRef, eventData);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, `trips/${docRef.id}/events`);
-        throw err;
-      }
-
-      setIsCreateOpen(false);
-      setCreationPath(null);
-      setAnchorText('');
-      setExtractedData(null);
-      onSelectTrip(docRef.id);
-    } catch (e: any) {
-      console.error("Error creating anchor-first trip:", e);
-      setErrorMsg(e.message || 'Error creating anchor-first trip');
-    }
-  };
-
-  // Brainstorm-first creator handler
   const handleCreateBrainstormTrip = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDestination.trim()) {
-      setErrorMsg('Destination is required for brainstorming ideas.');
+      setErrorMsg("Destination is required for brainstorming ideas.");
       return;
     }
 
@@ -662,7 +492,11 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
           </div>
 
           <button
-            onClick={() => setIsCreateOpen(true)}
+            onClick={() => {
+              setIsCreateOpen(true);
+              setCreationPath('fork');
+              setErrorMsg('');
+            }}
             className="flex items-center justify-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl text-sm transition shadow-lg shadow-indigo-100 active-pulse"
           >
             <Plus className="h-4 w-4" />
@@ -1047,290 +881,56 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
               {/* PATH 2: ANCHOR-FIRST FLOW */}
               {creationPath === 'anchor' && (
                 <div className="flex flex-col gap-4 overflow-hidden">
-                  {!extractedData ? (
-                    /* Step 1: Input free-text */
-                    <div className="flex flex-col gap-4">
-                      <div className="flex flex-col gap-1.5">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Describe your Booking or Event</label>
-                        <textarea
-                          rows={6}
-                          placeholder="Paste a confirmation email, or write something like:
-- 'My flight to Honolulu is departing from SFO on Dec 12th'
-- 'Phoebe's concert is Friday September 18, 2026 at Red Rocks'
-- 'A hotel booking at The Ritz Tokyo from June 3 to June 7'"
-                          value={anchorText}
-                          onChange={(e) => setAnchorText(e.target.value)}
-                          disabled={isExtracting}
-                          className="px-3 py-2.5 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500 transition font-sans resize-none"
-                        />
-                      </div>
+                  <AnchorExtractionFlow
+                    onConfirm={async (events) => {
+                      if (events.length === 0) return;
+                      const sortedDates = events.map(e => new Date(e.date).getTime()).sort((a,b) => a-b);
+                      const calculatedStart = new Date(sortedDates[0]).toISOString().split('T')[0];
+                      const calculatedEnd = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
 
-                      <div className="flex items-center justify-between border-t border-slate-100 pt-4">
-                        <button
-                          type="button"
-                          onClick={() => setCreationPath('fork')}
-                          disabled={isExtracting}
-                          className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition"
-                        >
-                          Back
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleExtractAnchor}
-                          disabled={isExtracting || !anchorText.trim()}
-                          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 transition flex items-center gap-2"
-                        >
-                          {isExtracting ? (
-                            <>
-                              <div className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                              Analyzing details...
-                            </>
-                          ) : (
-                            <>
-                              Analyze with AI
-                              <ArrowRight className="h-3.5 w-3.5" />
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    /* Step 2: Confirm / Edit Extracted details */
-                    <form onSubmit={handleCreateAnchorTrip} className="flex flex-col gap-4 overflow-y-auto max-h-[70vh] pr-1">
-                      {/* Section 1: Trip Metadata */}
-                      <div className="bg-slate-50/50 p-4 border border-slate-100 rounded-xl flex flex-col gap-3">
-                        <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-800 uppercase tracking-wider">
-                          <Compass className="h-3.5 w-3.5" />
-                          <span>Part 1: Trip Metadata</span>
-                        </div>
+                      try {
+                        const tripRef = await addDoc(collection(db, 'trips'), {
+                          title: events[0].title + ' Trip',
+                          destination: events[0].locationName || 'Unknown Destination',
+                          startDate: calculatedStart,
+                          endDate: calculatedEnd,
+                          tripType: 'mixed',
+                          coverColor: 'bg-blue-50 border-blue-100 text-blue-700',
+                          petFriendly: false,
+                          createdAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString(),
+                          roles: { [user.uid]: 'owner' }
+                        });
 
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Suggested Trip Title *</label>
-                            <input
-                              type="text"
-                              required
-                              value={confirmedTitle}
-                              onChange={(e) => setConfirmedTitle(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
+                        for (const ev of events) {
+                          const startDateTime = `${ev.date}T${ev.startTime}`;
+                          const endDateTime = `${ev.date}T${ev.endTime}`;
+                          await addDoc(collection(db, `trips/${tripRef.id}/events`), {
+                            category: ev.category,
+                            title: ev.title,
+                            startDateTime,
+                            endDateTime,
+                            locationName: ev.locationName,
+                            address: ev.address || '',
+                            notes: ev.notes || '',
+                            isAnchor: true,
+                            source: 'anchor',
+                            reservationNumber: ev.isBooked ? 'Confirmed' : '',
+                            timezone: ev.timezone || 'UTC',
+                            coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null
+                          });
+                        }
 
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Destination *</label>
-                            <input
-                              type="text"
-                              required
-                              value={confirmedDestination}
-                              onChange={(e) => setConfirmedDestination(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                           <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Start Date *</label>
-                            <input
-                              type="date"
-                              required
-                              value={confirmedStartDate}
-                              onChange={(e) => setConfirmedStartDate(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">End Date *</label>
-                            <input
-                              type="date"
-                              required
-                              value={confirmedEndDate}
-                              onChange={(e) => setConfirmedEndDate(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Trip Type</label>
-                            <select
-                              value={confirmedTripType}
-                              onChange={(e) => setConfirmedTripType(e.target.value as TripType)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            >
-                              <option value="mixed">Mixed Travel</option>
-                              <option value="road-trip">Road Trip</option>
-                              <option value="flights">Flights Only</option>
-                            </select>
-                          </div>
-
-                          <div className="flex items-center gap-2 pt-4">
-                            <input
-                              type="checkbox"
-                              id="confirmedPetFriendly"
-                              checked={confirmedPetFriendly}
-                              onChange={(e) => setConfirmedPetFriendly(e.target.checked)}
-                              className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600"
-                            />
-                            <label htmlFor="confirmedPetFriendly" className="text-[11px] font-semibold text-slate-600 flex items-center gap-1 cursor-pointer">
-                              <Dog className="h-3 w-3 text-emerald-600" />
-                              Pet Friendly
-                            </label>
-                          </div>
-                        </div>
-
-                        <div className="flex flex-col gap-1.5 mt-1">
-                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Accent Theme Color</label>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {COVER_COLORS.map(color => (
-                              <button
-                                type="button"
-                                key={color.name}
-                                onClick={() => setConfirmedCoverColor(color.name)}
-                                className={`h-6 px-2 rounded-md text-[10px] font-semibold border transition ${
-                                  confirmedCoverColor === color.name 
-                                    ? 'ring-2 ring-indigo-500 border-indigo-500 font-bold' 
-                                    : 'border-slate-200 text-slate-600'
-                                }`}
-                                style={{ backgroundColor: color.name === 'Sapphire' ? '#f0f9ff' : color.name === 'Emerald' ? '#ecfdf5' : color.name === 'Amber' ? '#fffbeb' : color.name === 'Orange' ? '#fff7ed' : color.name === 'Violet' ? '#faf5ff' : '#f8fafc' }}
-                              >
-                                {color.name}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Section 2: Anchor Event details */}
-                      <div className="bg-indigo-50/30 p-4 border border-indigo-100 rounded-xl flex flex-col gap-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-800 uppercase tracking-wider">
-                            <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
-                            <span>Part 2: Primary Anchor Event</span>
-                          </div>
-                          
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="checkbox"
-                              id="confirmedIsBooked"
-                              checked={confirmedIsBooked}
-                              onChange={(e) => setConfirmedIsBooked(e.target.checked)}
-                              className="h-3.5 w-3.5 rounded border-slate-300 text-indigo-600"
-                            />
-                            <label htmlFor="confirmedIsBooked" className="text-[11px] font-bold text-indigo-800 cursor-pointer flex items-center gap-0.5">
-                              Already Booked / Confirmed
-                            </label>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Anchor Event Title *</label>
-                            <input
-                              type="text"
-                              required
-                              value={confirmedEventTitle}
-                              onChange={(e) => setConfirmedEventTitle(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Category *</label>
-                            <select
-                              value={confirmedEventCategory}
-                              onChange={(e) => setConfirmedEventCategory(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            >
-                              <option value="activity">Activity / Sightseeing</option>
-                              <option value="stay">Stay / Hotel</option>
-                              <option value="travel">Travel / Flight / Train</option>
-                              <option value="food">Food / Restaurant</option>
-                              <option value="logistics">Logistics / Meeting / Wedding</option>
-                            </select>
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Specific Date *</label>
-                            <input
-                              type="date"
-                              required
-                              value={confirmedEventDate}
-                              onChange={(e) => setConfirmedEventDate(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Start Time</label>
-                            <input
-                              type="time"
-                              required
-                              value={confirmedEventStartTime}
-                              onChange={(e) => setConfirmedEventStartTime(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">End Time</label>
-                            <input
-                              type="time"
-                              required
-                              value={confirmedEventEndTime}
-                              onChange={(e) => setConfirmedEventEndTime(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Venue / Location Name *</label>
-                            <input
-                              type="text"
-                              required
-                              value={confirmedEventLocation}
-                              onChange={(e) => setConfirmedEventLocation(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Physical Address</label>
-                            <input
-                              type="text"
-                              value={confirmedEventAddress}
-                              onChange={(e) => setConfirmedEventAddress(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white"
-                            />
-                          </div>
-
-                          <div className="flex flex-col gap-1 col-span-2">
-                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Event Notes / Confirmations</label>
-                            <textarea
-                              rows={2}
-                              value={confirmedEventNotes}
-                              onChange={(e) => setConfirmedEventNotes(e.target.value)}
-                              className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs outline-none focus:border-indigo-500 bg-white resize-none"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between border-t border-slate-100 pt-4 mt-2">
-                        <button
-                          type="button"
-                          onClick={() => setExtractedData(null)}
-                          className="px-4 py-2 border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-bold transition"
-                        >
-                          Back to Edit Text
-                        </button>
-                        <button
-                          type="submit"
-                          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-100 transition"
-                        >
-                          Confirm &amp; Create Trip
-                        </button>
-                      </div>
-                    </form>
-                  )}
+                        onSelectTrip(tripRef.id);
+                        setIsCreateOpen(false);
+                        setCreationPath(null);
+                      } catch (err: any) {
+                        console.error("Error saving trip with anchor events:", err);
+                        setErrorMsg("Failed to save trip. Please try again.");
+                      }
+                    }}
+                    onCancel={() => setCreationPath('fork')}
+                  />
                 </div>
               )}
 

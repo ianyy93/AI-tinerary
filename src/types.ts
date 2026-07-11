@@ -32,6 +32,13 @@ export interface Trip {
   createdAt: string;
 }
 
+export interface EventOption {
+  name: string;
+  lat?: number;
+  lng?: number;
+  notes?: string;
+}
+
 export interface ItineraryEvent {
   id: string;
   title: string;
@@ -51,6 +58,8 @@ export interface ItineraryEvent {
   timeUnknown?: boolean;
   travelerIds?: string[];
   source?: 'manual' | 'wizard' | 'anchor' | 'ai-suggested';
+  status?: 'confirmed' | 'pending';
+  options?: EventOption[];
 }
 
 export interface Day {
@@ -64,4 +73,16 @@ export interface UserSession {
   displayName: string | null;
   uid: string | null;
   isAnonymous: boolean;
+}
+
+export interface ShortlistItem {
+  id: string;
+  title: string;
+  category: EventCategory;
+  locationName: string;
+  address?: string;
+  coordinates?: { lat: number; lng: number };
+  notes?: string;
+  addedFrom: 'wizard' | 'copilot' | 'manual';
+  createdAt: string;
 }

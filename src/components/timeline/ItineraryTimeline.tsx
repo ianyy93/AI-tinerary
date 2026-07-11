@@ -8,12 +8,13 @@ import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, query, orderBy } from 'firebase/firestore';
 import { Trip, ItineraryEvent, EventCategory, Day } from '../../types';
 import { 
-  Plus, Edit2, Trash2, Sparkles, MapPin, Clock, Home, Plane, Compass, Utensils, Info, 
-  Dog, AlertCircle, FileText, CheckCircle2, Link, Globe, ChevronRight 
+  Plus, Edit2, Trash2, Sparkles, MapPin, Clock, Home, Plane, Compass, X, Utensils, Info, 
+  Dog, AlertCircle, FileText, CheckCircle2, Link, Globe, ChevronRight, HelpCircle 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
 import { inferTimezone } from '../../utils/timezone';
+import { AnchorExtractionFlow } from '../hub/AnchorExtractionFlow';
 
 interface ItineraryTimelineProps {
   trip: Trip;
@@ -47,13 +48,19 @@ const COMMON_TIMEZONES = [
 
 export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectDay, userRole }: ItineraryTimelineProps) {
   const [events, setEvents] = useState<ItineraryEvent[]>([]);
+  const [shortlistItems, setShortlistItems] = useState<any[]>([]);
   const [overnightMarkers, setOvernightMarkers] = useState<{start: string[], end: string[]}>({ start: [], end: [] });
     // Pending deletes
   const [pendingDeletes, setPendingDeletes] = useState<string[]>([]);
   const deleteTimeouts = useRef<{ [key: string]: NodeJS.Timeout }>({});
 
-const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<ItineraryEvent | null>(null);
+  const [shortlistSourceId, setShortlistSourceId] = useState<string | null>(null);
+  const [isShortlistModalOpen, setIsShortlistModalOpen] = useState(false);
+  const [expandedPendingEventId, setExpandedPendingEventId] = useState<string | null>(null);
+  const [customOptionText, setCustomOptionText] = useState('');
 
   // Form states
   const [title, setTitle] = useState('');
@@ -75,44 +82,9 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const [eventTravelerIds, setEventTravelerIds] = useState<string[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isGeocoding, setIsGeocoding] = useState(false);
-  const [emailText, setEmailText] = useState('');
-  const [isParsingEmail, setIsParsingEmail] = useState(false);
+  
 
-  const handleParseEmail = async () => {
-    if (!emailText.trim()) return;
-    setIsParsingEmail(true);
-    setErrorMsg('');
-    try {
-      const res = await fetch('/api/parse-email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          emailText,
-          tripDestination: trip.destination,
-          category
-        })
-      });
-      const data = await res.json();
-      if (data.success && data.data) {
-        const d = data.data;
-        if (d.title) setTitle(d.title);
-        if (d.startDateTimeLocal) setStartDateTimeLocal(d.startDateTimeLocal);
-        if (d.endDateTimeLocal) setEndDateTimeLocal(d.endDateTimeLocal);
-        if (d.locationName) setLocationName(d.locationName);
-        if (d.address) setAddress(d.address);
-        if (d.reservationNumber) setReservationNumber(d.reservationNumber);
-        if (d.notes) setNotes(d.notes);
-        setEmailText('');
-      } else {
-        setErrorMsg(data.error || 'Failed to parse email');
-      }
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to parse email');
-    } finally {
-      setIsParsingEmail(false);
-    }
-  };
-
+  
   const geocodeLocation = async (locName: string, addr: string): Promise<{ lat: number; lng: number } | null> => {
     const queries: string[] = [];
     if (addr && locName) queries.push(`${locName}, ${addr}`);
@@ -171,7 +143,17 @@ const [isModalOpen, setIsModalOpen] = useState(false);
 
   // Sync / listen to events for the selected day from the flat collection (or all stays & flights)
   useEffect(() => {
-    if (!trip.id || !selectedDayId || !days.length) return;
+    if (!trip.id) return;
+    const shortlistRef = collection(db, `trips/${trip.id}/shortlist`);
+    const unsub = onSnapshot(shortlistRef, (snap) => {
+      const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setShortlistItems(items);
+    });
+    return () => unsub();
+  }, [trip.id]);
+
+  useEffect(() => {
+    if (!trip.id || (!selectedDayId && selectedDayId !== 'shortlist') || (!days.length && selectedDayId !== 'shortlist')) return;
 
     const isStaysFlights = selectedDayId === 'stays-flights';
     const currentDay = days.find(d => d.id === selectedDayId);
@@ -251,6 +233,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
   const openAddModal = () => {
     if (userRole === 'viewer') return;
     setEditingEvent(null);
+    setShortlistSourceId(null);
     setTitle('');
     
     const isStaysFlights = selectedDayId === 'stays-flights';
@@ -274,10 +257,35 @@ const [isModalOpen, setIsModalOpen] = useState(false);
     setIsModalOpen(true);
   };
 
+  const openScheduleModal = (item: any) => {
+    if (userRole === 'viewer') return;
+    setEditingEvent(null);
+    setShortlistSourceId(item.id);
+    setTitle(item.title || '');
+    setCategory(item.category || 'activity');
+    const currentDay = days.length > 0 ? days[0] : null;
+    const dateStr = currentDay ? currentDay.dateStr : new Date().toISOString().split('T')[0];
+    setStartDateTimeLocal(`${dateStr}T09:00`);
+    setEndDateTimeLocal(`${dateStr}T10:00`);
+    setLocationName(item.locationName || '');
+    setAddress(item.address || '');
+    setLat(item.coordinates?.lat?.toString() || '');
+    setLng(item.coordinates?.lng?.toString() || '');
+    setNotes(item.notes || '');
+    setReservationNumber('');
+    setDogFriendly(item.dogFriendly || false);
+    setFileUrl('');
+    setFileName('');
+    setEventTravelerIds([]);
+    setErrorMsg('');
+    setIsModalOpen(true);
+  };
+
   // Open modal for edit
   const openEditModal = (event: ItineraryEvent) => {
     if (userRole === 'viewer') return;
     setEditingEvent(event);
+    setShortlistSourceId(null);
     setTitle(event.title || '');
     setCategory(event.category || 'activity');
 
@@ -373,7 +381,12 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         travelerIds: eventTravelerIds,
         updatedAt: new Date().toISOString(),
         timeUnknown: false,
+        status: editingEvent ? (editingEvent.status || 'confirmed') : 'confirmed',
       };
+
+      if (editingEvent && editingEvent.options) {
+        eventData.options = editingEvent.options;
+      }
 
       if (!isNaN(finalLat) && !isNaN(finalLng)) {
         eventData.coordinates = { lat: finalLat, lng: finalLng };
@@ -393,6 +406,10 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         const eventsCollRef = collection(db, `trips/${trip.id}/events`);
         try {
           await addDoc(eventsCollRef, eventData);
+          if (shortlistSourceId) {
+            const shortlistDocRef = doc(db, `trips/${trip.id}/shortlist`, shortlistSourceId);
+            await deleteDoc(shortlistDocRef);
+          }
         } catch (err) {
           handleFirestoreError(err, OperationType.CREATE, `trips/${trip.id}/events`);
           throw err;
@@ -461,6 +478,15 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         </div>
 
         {userRole !== 'viewer' && (
+          <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsBookingModalOpen(true)}
+            className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-emerald-50 hover:bg-emerald-100 border-emerald-100 text-emerald-700"
+            title="Add Booking (AI)"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Add Booking
+          </button>
           <button
             onClick={openAddModal}
             className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-700"
@@ -469,12 +495,27 @@ const [isModalOpen, setIsModalOpen] = useState(false);
             <Plus className="h-3.5 w-3.5" />
             Add Stop
           </button>
+        </div>
         )}
       </div>
 
       {/* Days Scroller */}
       <div className="flex gap-2 overflow-x-auto py-3 border-b border-slate-100 scrollbar-none" id="days-tabs">
         {days.length > 0 && (
+          <>
+          <button
+            onClick={() => onSelectDay('shortlist')}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition flex flex-col items-center justify-center ${
+              selectedDayId === 'shortlist'
+                ? 'bg-purple-600 border-purple-600 text-white shadow-md shadow-purple-100'
+                : 'bg-purple-50 border-purple-100 text-purple-800 hover:bg-purple-100'
+            }`}
+          >
+            <div className="font-bold">📝 Shortlist {shortlistItems.length > 0 && `(${shortlistItems.length})`}</div>
+            <div className={`text-[9px] ${selectedDayId === 'shortlist' ? 'text-purple-100' : 'text-purple-600'} mt-0.5`}>
+              Unscheduled ideas
+            </div>
+          </button>
           <button
             onClick={() => onSelectDay('stays-flights')}
             className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition flex flex-col items-center justify-center ${
@@ -488,6 +529,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
               All bookings
             </div>
           </button>
+          </>
         )}
 
         {days.length === 0 ? (
@@ -569,7 +611,61 @@ const [isModalOpen, setIsModalOpen] = useState(false);
         </div>
       )}
 
-      {(() => {
+      {selectedDayId === 'shortlist' ? (
+        <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-3">
+          {shortlistItems.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <Sparkles className="h-10 w-10 text-slate-300 mb-3" />
+              <h4 className="font-display font-bold text-sm text-slate-800">Shortlist is Empty</h4>
+              {userRole !== 'viewer' && (
+                <button 
+                  onClick={() => setIsShortlistModalOpen(true)}
+                  className="mt-4 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-sm"
+                >
+                  Add Idea Manually
+                </button>
+              )}
+              <p className="text-xs text-slate-400 max-w-xs mt-1.5">
+                Great ideas without a specific day will show up here. Use the Copilot or Add to Shortlist directly!
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <div className="flex justify-end mb-2">
+                {userRole !== 'viewer' && (
+                  <button 
+                    onClick={() => setIsShortlistModalOpen(true)}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold rounded-lg transition shadow-sm"
+                  >
+                    + Add Idea
+                  </button>
+                )}
+              </div>
+              {shortlistItems.map(item => (
+              <div key={item.id} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm relative group flex flex-col gap-2">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <h4 className="font-display font-bold text-sm text-slate-900">{item.title}</h4>
+                    <p className="text-[11px] text-slate-500 font-medium">{item.locationName}</p>
+                    {item.notes && <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{item.notes}</p>}
+                  </div>
+                  {userRole !== 'viewer' && (
+                    <button 
+                      onClick={() => {
+                        openScheduleModal(item);
+                      }}
+                      className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold rounded-lg transition"
+                    >
+                      Schedule
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+            </div>
+          )}
+        </div>
+      ) : (() => {
         const filteredEvents = events.filter((event) => {
           if (pendingDeletes.includes(event.id)) return false;
           if (filterTravelerId === 'everyone') {
@@ -641,173 +737,283 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                     showTransit = true;
                   }
 
+                  const isPending = event.status === 'pending';
+                  const isExpanded = expandedPendingEventId === event.id;
+
                   return (
                     <React.Fragment key={event.id}>
                     <motion.div 
-                      initial={{ opacity: 0, x: -5 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: index * 0.05 }}
-                      className="relative group bg-white border border-slate-100 hover:border-slate-200/80 rounded-xl p-4 shadow-sm hover:shadow-md transition"
-                    >
-                      {/* Category icon node on timeline line */}
-                      <div className={`absolute -left-[22px] top-4.5 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm ${cat.colorClass}`}>
-                        <Icon className="h-3 w-3" />
-                      </div>
+                        initial={{ opacity: 0, x: -5 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: index * 0.05 }}
+                        className={`relative group bg-white border rounded-xl p-4 shadow-sm transition ${
+                          isPending 
+                            ? 'border-dashed border-2 border-indigo-300 hover:border-indigo-400/90 bg-indigo-50/5 cursor-pointer' 
+                            : 'border-slate-100 hover:border-slate-200/80 hover:shadow-md'
+                        }`}
+                        onClick={() => {
+                          if (isPending) {
+                            setExpandedPendingEventId(isExpanded ? null : event.id);
+                            setCustomOptionText('');
+                          }
+                        }}
+                      >
+                        {/* Category icon node on timeline line */}
+                        <div className={`absolute -left-[22px] top-4.5 h-6 w-6 rounded-full border-2 border-white flex items-center justify-center shadow-sm ${cat.colorClass}`}>
+                          <Icon className="h-3 w-3" />
+                        </div>
 
-                      {/* Event content */}
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
-                              {cat.label}
-                            </span>
-                            {(event.source === 'anchor' || event.isAnchor) && (
-                              <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-blue-100 flex items-center gap-1" title="Fixed/Booked Anchor Event">
-                                <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
-                                Anchor
+                        {/* Event content */}
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
+                                {cat.label}
                               </span>
-                            )}
-                            {event.source === 'wizard' && (
-                              <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-100 flex items-center gap-1" title="Wizard Suggested Entry">
-                                <Sparkles className="h-2.5 w-2.5" />
-                                Wizard
-                              </span>
-                            )}
-                            {event.source === 'ai-suggested' && (
-                              <span className="bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-purple-100 flex items-center gap-1" title="AI Copilot Suggested Entry">
-                                <Sparkles className="h-2.5 w-2.5" />
-                                AI Suggestion
-                              </span>
-                            )}
-                            {event.dogFriendly && (
-                              <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-0.5 border border-emerald-100" title="Dog Friendly Stop">
-                                <Dog className="h-2.5 w-2.5" />
-                                Dog Friendly
-                              </span>
+                              {isPending && (
+                                <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] font-bold border border-indigo-200 animate-pulse flex items-center gap-1">
+                                  <HelpCircle className="h-3 w-3 text-indigo-500" />
+                                  Pick one
+                                </span>
+                              )}
+                              {(event.source === 'anchor' || event.isAnchor) && (
+                                <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-blue-100 flex items-center gap-1" title="Fixed/Booked Anchor Event">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                                  Anchor
+                                </span>
+                              )}
+                              {event.source === 'wizard' && (
+                                <span className="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-100 flex items-center gap-1" title="Wizard Suggested Entry">
+                                  <Sparkles className="h-2.5 w-2.5" />
+                                  Wizard
+                                </span>
+                              )}
+                              {event.source === 'ai-suggested' && (
+                                <span className="bg-purple-50 text-purple-600 px-1.5 py-0.5 rounded text-[9px] font-bold border border-purple-100 flex items-center gap-1" title="AI Copilot Suggested Entry">
+                                  <Sparkles className="h-2.5 w-2.5" />
+                                  AI Suggestion
+                                </span>
+                              )}
+                              {event.dogFriendly && (
+                                <span className="bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-0.5 border border-emerald-100" title="Dog Friendly Stop">
+                                  <Dog className="h-2.5 w-2.5" />
+                                  Dog Friendly
+                                </span>
+                              )}
+                            </div>
+
+                            {userRole !== 'viewer' && (
+                              <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  onClick={() => openEditModal(event)}
+                                  className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-50 transition"
+                                >
+                                  <Edit2 className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteEvent(event.id, e)}
+                                  className="p-1 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             )}
                           </div>
 
-                          {userRole !== 'viewer' && (
-                            <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition">
-                              <button
-                                onClick={() => openEditModal(event)}
-                                className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-50 transition"
+                          <div className="flex items-center justify-between gap-1.5 mt-1">
+                            <h4 className="font-display font-bold text-sm text-slate-900 group-hover:text-indigo-600 transition leading-tight">
+                              {event.title}
+                            </h4>
+                            {!event.timeUnknown && (() => {
+                              const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
+                              const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
+                              const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');
+                              const timeStr = isSpanning 
+                                ? `${startLocal.toFormat('MMM dd, HH:mm')} → ${endLocal.toFormat('MMM dd, HH:mm')}`
+                                : `${startLocal.toFormat('HH:mm')} — ${endLocal.toFormat('HH:mm')}`;
+                              return (
+                                <span className="text-[11px] font-mono text-indigo-600 font-bold shrink-0 bg-indigo-50/50 px-2 py-0.5 rounded">
+                                  {timeStr}
+                                </span>
+                              );
+                            })()}
+                          </div>
+
+                          {/* Assigned Travelers Initials badges */}
+                          {event.travelerIds && event.travelerIds.length > 0 && trip.travelers && trip.travelers.length > 0 && (
+                            <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                              <span className="text-[9px] text-slate-400 font-medium font-mono uppercase tracking-wider">Travelers:</span>
+                              <div className="flex -space-x-1 overflow-hidden">
+                                {trip.travelers
+                                  .filter((t) => event.travelerIds?.includes(t.id))
+                                  .map((traveler) => {
+                                    const initials = traveler.name
+                                      .split(' ')
+                                      .map((n) => n[0])
+                                      .join('')
+                                      .toUpperCase()
+                                      .slice(0, 2);
+                                    return (
+                                      <div
+                                        key={traveler.id}
+                                        className={`inline-block h-5 w-5 rounded-full ${traveler.color || 'bg-slate-500'} text-[8px] font-bold text-white flex items-center justify-center ring-2 ring-white select-none`}
+                                        title={traveler.name}
+                                      >
+                                        {initials}
+                                      </div>
+                                    );
+                                  })}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="flex items-center gap-1 text-xs text-slate-500 font-medium">
+                            <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                            <span className="truncate">{event.locationName}</span>
+                          </div>
+
+                          {event.notes && (
+                            <p className="text-xs text-slate-500/90 leading-relaxed bg-slate-50/70 p-2.5 rounded-lg border border-slate-100/50 italic mt-1">
+                              {event.notes}
+                            </p>
+                          )}
+
+                          {/* Reservation details & Maps Integration panel */}
+                          {(event.reservationNumber || event.fileUrl) && (
+                            <div className="bg-slate-50/50 border border-slate-100/80 p-2.5 rounded-lg mt-1 flex flex-col gap-1.5">
+                              <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Reservation Info</div>
+                              <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
+                                {event.reservationNumber && (
+                                  <div className="flex items-center gap-1 text-xs font-medium text-slate-700">
+                                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                    <span>Code: <b className="font-mono">{event.reservationNumber}</b></span>
+                                  </div>
+                                )}
+                                {event.fileUrl && (
+                                  <a
+                                    href={event.fileUrl}
+                                    download={event.fileName || 'reservation-receipt'}
+                                    className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:underline"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <FileText className="h-3.5 w-3.5" />
+                                    <span>View Receipt ({event.fileName ? (event.fileName.length > 15 ? event.fileName.slice(0, 15) + '...' : event.fileName) : 'Attached'})</span>
+                                  </a>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Interactive Option Selector Panel for Pending Events */}
+                          {isPending && isExpanded && (
+                            <div className="mt-3 p-3 bg-indigo-50/50 border border-indigo-100 rounded-xl flex flex-col gap-3" onClick={(e) => e.stopPropagation()}>
+                              <div className="text-[10px] font-mono text-indigo-800 uppercase tracking-wider font-bold">Choose a restaurant/option:</div>
+                              
+                              <div className="flex flex-col gap-2.5">
+                                {event.options && event.options.map((opt, oIdx) => (
+                                  <div key={oIdx} className="bg-white border border-slate-100 p-2.5 rounded-lg flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 hover:border-indigo-200 transition">
+                                    <div className="flex-1">
+                                      <div className="font-bold text-xs text-slate-800">{opt.name}</div>
+                                      {opt.notes && <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">{opt.notes}</p>}
+                                      {opt.address && <p className="text-[10px] text-slate-400 font-mono mt-0.5">{opt.address}</p>}
+                                    </div>
+                                    <button
+                                      onClick={async () => {
+                                        if (userRole === 'viewer') return;
+                                        const eventDocRef = doc(db, `trips/${trip.id}/events`, event.id);
+                                        await updateDoc(eventDocRef, {
+                                          title: opt.name,
+                                          locationName: opt.name,
+                                          address: opt.address || '',
+                                          coordinates: opt.lat && opt.lng ? { lat: opt.lat, lng: opt.lng } : null,
+                                          notes: opt.notes || '',
+                                          status: 'confirmed',
+                                          options: null, // Clear choice options
+                                          updatedAt: new Date().toISOString()
+                                        });
+                                        setExpandedPendingEventId(null);
+                                      }}
+                                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] rounded-lg transition shrink-0 self-end sm:self-center cursor-pointer"
+                                    >
+                                      Choose
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {/* Custom Option Input */}
+                              <div className="border-t border-slate-200/60 pt-2.5 mt-1 flex flex-col gap-1.5">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Or type custom restaurant / place:</label>
+                                <div className="flex gap-2">
+                                  <input
+                                    type="text"
+                                    placeholder="Type customized name..."
+                                    value={customOptionText}
+                                    onChange={(e) => setCustomOptionText(e.target.value)}
+                                    className="flex-1 text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-slate-800 focus:outline-none focus:border-indigo-500"
+                                  />
+                                  <button
+                                    onClick={async () => {
+                                      if (!customOptionText.trim()) return;
+                                      if (userRole === 'viewer') return;
+                                      const eventDocRef = doc(db, `trips/${trip.id}/events`, event.id);
+                                      
+                                      let customLat: number | undefined = undefined;
+                                      let customLng: number | undefined = undefined;
+                                      try {
+                                        const coords = await geocodeLocation(customOptionText, '');
+                                        if (coords) {
+                                          customLat = coords.lat;
+                                          customLng = coords.lng;
+                                        }
+                                      } catch (e) {
+                                        console.error("Geocoding custom option failed:", e);
+                                      }
+
+                                      await updateDoc(eventDocRef, {
+                                        title: customOptionText,
+                                        locationName: customOptionText,
+                                        address: '',
+                                        coordinates: customLat && customLng ? { lat: customLat, lng: customLng } : null,
+                                        notes: 'Custom option chosen',
+                                        status: 'confirmed',
+                                        options: null,
+                                        updatedAt: new Date().toISOString()
+                                      });
+                                      setExpandedPendingEventId(null);
+                                      setCustomOptionText('');
+                                    }}
+                                    className="px-3 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center cursor-pointer"
+                                  >
+                                    Submit
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Map Navigation Direct Link buttons - Hide for pending */}
+                          {!isPending && (
+                            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-50" onClick={(e) => e.stopPropagation()}>
+                              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Navigate:</span>
+                              <a 
+                                href={googleMapsUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
                               >
-                                <Edit2 className="h-3.5 w-3.5" />
-                              </button>
-                              <button
-                                onClick={(e) => handleDeleteEvent(event.id, e)}
-                                className="p-1 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+                                Google Maps
+                              </a>
+                              <a 
+                                href={appleMapsUrl}
+                                className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                                Apple Maps
+                              </a>
                             </div>
                           )}
                         </div>
-
-                        <div className="flex items-center justify-between gap-1.5 mt-1">
-                          <h4 className="font-display font-bold text-sm text-slate-900 group-hover:text-indigo-600 transition leading-tight">
-                            {event.title}
-                          </h4>
-                          {!event.timeUnknown && (() => {
-                            const startLocal = DateTime.fromISO(event.startDateTime).setZone(event.timezone);
-                            const endLocal = DateTime.fromISO(event.endDateTime).setZone(event.timezone);
-                            const isSpanning = startLocal.toFormat('yyyy-MM-dd') !== endLocal.toFormat('yyyy-MM-dd');
-                            const timeStr = isSpanning 
-                              ? `${startLocal.toFormat('MMM dd, HH:mm')} → ${endLocal.toFormat('MMM dd, HH:mm')}`
-                              : `${startLocal.toFormat('HH:mm')} — ${endLocal.toFormat('HH:mm')}`;
-                            return (
-                              <span className="text-[11px] font-mono text-indigo-600 font-bold shrink-0 bg-indigo-50/50 px-2 py-0.5 rounded">
-                                {timeStr}
-                              </span>
-                            );
-                          })()}
-                        </div>
-
-                        {/* Assigned Travelers Initials badges */}
-                        {event.travelerIds && event.travelerIds.length > 0 && trip.travelers && trip.travelers.length > 0 && (
-                          <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                            <span className="text-[9px] text-slate-400 font-medium font-mono uppercase tracking-wider">Travelers:</span>
-                            <div className="flex -space-x-1 overflow-hidden">
-                              {trip.travelers
-                                .filter((t) => event.travelerIds?.includes(t.id))
-                                .map((traveler) => {
-                                  const initials = traveler.name
-                                    .split(' ')
-                                    .map((n) => n[0])
-                                    .join('')
-                                    .toUpperCase()
-                                    .slice(0, 2);
-                                  return (
-                                    <div
-                                      key={traveler.id}
-                                      className={`inline-block h-5 w-5 rounded-full ${traveler.color || 'bg-slate-500'} text-[8px] font-bold text-white flex items-center justify-center ring-2 ring-white select-none`}
-                                      title={traveler.name}
-                                    >
-                                      {initials}
-                                    </div>
-                                  );
-                                })}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="flex items-center gap-1 text-xs text-slate-500 font-medium">
-                          <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                          <span className="truncate">{event.locationName}</span>
-                        </div>
-
-                        {event.notes && (
-                          <p className="text-xs text-slate-500/90 leading-relaxed bg-slate-50/70 p-2.5 rounded-lg border border-slate-100/50 italic mt-1">
-                            {event.notes}
-                          </p>
-                        )}
-
-                        {/* Reservation details & Maps Integration panel */}
-                        {(event.reservationNumber || event.fileUrl) && (
-                          <div className="bg-slate-50/50 border border-slate-100/80 p-2.5 rounded-lg mt-1 flex flex-col gap-1.5">
-                            <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider font-bold">Reservation Info</div>
-                            <div className="flex flex-wrap gap-x-4 gap-y-1.5 items-center">
-                              {event.reservationNumber && (
-                                <div className="flex items-center gap-1 text-xs font-medium text-slate-700">
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                                  <span>Code: <b className="font-mono">{event.reservationNumber}</b></span>
-                                </div>
-                              )}
-                              {event.fileUrl && (
-                                <a
-                                  href={event.fileUrl}
-                                  download={event.fileName || 'reservation-receipt'}
-                                  className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:underline"
-                                >
-                                  <FileText className="h-3.5 w-3.5" />
-                                  <span>View Receipt ({event.fileName ? (event.fileName.length > 15 ? event.fileName.slice(0, 15) + '...' : event.fileName) : 'Attached'})</span>
-                                </a>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Map Navigation Direct Link buttons */}
-                        <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-50">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Navigate:</span>
-                          <a 
-                            href={googleMapsUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
-                          >
-                            Google Maps
-                          </a>
-                          <a 
-                            href={appleMapsUrl}
-                            className="px-2 py-1 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 border border-slate-200/50 rounded text-[10px] font-semibold transition"
-                          >
-                            Apple Maps
-                          </a>
-                        </div>
-                      </div>
-                    </motion.div>
+                      </motion.div>
                     
                     {showTransit && (
                       <div className="relative pl-2 py-2 flex items-center gap-3 opacity-80 hover:opacity-100 transition">
@@ -853,6 +1059,53 @@ const [isModalOpen, setIsModalOpen] = useState(false);
           </div>
         );
       })()}
+
+      
+      {isBookingModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between p-4 border-b border-slate-100 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4.5 w-4.5 text-emerald-600" />
+                <h3 className="font-display font-bold text-slate-800 text-base">Add a Booking with AI</h3>
+              </div>
+              <button onClick={() => setIsBookingModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5 overflow-y-auto">
+              <AnchorExtractionFlow
+                onConfirm={async (events) => {
+                  try {
+                    for (const ev of events) {
+                      const startDateTime = `${ev.date}T${ev.startTime}`;
+                      const endDateTime = `${ev.date}T${ev.endTime}`;
+                      await addDoc(collection(db, `trips/${trip.id}/events`), {
+                        category: ev.category,
+                        title: ev.title,
+                        startDateTime,
+                        endDateTime,
+                        locationName: ev.locationName,
+                        address: ev.address || '',
+                        notes: ev.notes || '',
+                        isAnchor: true,
+                        source: 'anchor',
+                        reservationNumber: ev.isBooked ? 'Confirmed' : '',
+                        timezone: ev.timezone || inferTimezone(trip.destination),
+                        coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null
+                      });
+                    }
+                    setIsBookingModalOpen(false);
+                  } catch (e) {
+                    console.error("Failed to add booking events:", e);
+                  }
+                }}
+                onCancel={() => setIsBookingModalOpen(false)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* EVENT ADD/EDIT MODAL */}
       <AnimatePresence>
@@ -913,34 +1166,7 @@ const [isModalOpen, setIsModalOpen] = useState(false);
                   </div>
                 </div>
 
-                {(category === 'stay' || category === 'travel') && (
-                  <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100 flex flex-col gap-2">
-                    <div className="flex items-center gap-2 text-indigo-800">
-                      <Sparkles className="w-4 h-4 text-indigo-600" />
-                      <label className="text-xs font-bold uppercase tracking-wider">AI Email Parser</label>
-                    </div>
-                    <p className="text-[10px] text-indigo-600/80 mb-1">
-                      Paste your booking confirmation email text below and we'll auto-fill the details for you!
-                    </p>
-                    <div className="flex gap-2">
-                      <textarea
-                        rows={3}
-                        value={emailText}
-                        onChange={(e) => setEmailText(e.target.value)}
-                        placeholder={`Paste your ${category === 'stay' ? 'hotel' : 'flight'} confirmation email...`}
-                        className="flex-1 px-3 py-2 border border-indigo-200 rounded-lg text-xs outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition resize-none bg-white/50 backdrop-blur-sm"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleParseEmail}
-                        disabled={isParsingEmail || !emailText.trim()}
-                        className="self-end px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition shadow-sm"
-                      >
-                        {isParsingEmail ? 'Parsing...' : 'Auto-fill'}
-                      </button>
-                    </div>
-                  </div>
-                )}
+                
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="flex flex-col gap-1">

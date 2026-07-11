@@ -193,6 +193,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           startDate: trip.startDate,
           endDate: trip.endDate,
           previousData: wizardData,
+          existingEvents: events,
           customPrompt: activeStepPrompt,
         }),
       });
@@ -255,6 +256,22 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
         const lastDay = tripDays[tripDays.length - 1];
         const staysColl = collection(db, `trips/${trip.id}/events`);
         for (const stay of acceptedItems) {
+          if (stay.addToShortlist) {
+            const shortlistColl = collection(db, `trips/${trip.id}/shortlist`);
+            await addDoc(shortlistColl, {
+              title: stay.title,
+              category: 'stay',
+              locationName: stay.locationName,
+              address: stay.address,
+              notes: stay.notes,
+              coordinates: { lat: stay.lat, lng: stay.lng },
+              dogFriendly: trip.petFriendly,
+              addedFrom: 'wizard',
+              createdAt: new Date().toISOString()
+            });
+            continue;
+          }
+
           const stayTz = inferTimezone(stay.locationName || trip.destination);
           
           const reservationNumber = `RES-${Math.random().toString(36).substr(2, 6).toUpperCase()}`;
@@ -327,19 +344,41 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
               finalEndLocal = endLocal.plus({ days: 1 });
             }
 
-            await addDoc(eventsColl, {
-              title: item.title,
-              category: category,
-              startDateTime: startLocal.toISO(),
-              endDateTime: finalEndLocal.toISO(),
-              timezone: itemTz,
-              locationName: item.locationName,
-              address: item.address,
-              notes: item.notes,
-              coordinates: { lat: item.lat, lng: item.lng },
-              dogFriendly: trip.petFriendly,
-              source: 'wizard',
-            });
+            if (item.addToShortlist) {
+              const shortlistColl = collection(db, `trips/${trip.id}/shortlist`);
+              await addDoc(shortlistColl, {
+                title: item.title,
+                category: category,
+                locationName: item.locationName,
+                address: item.address,
+                notes: item.notes,
+                coordinates: { lat: item.lat, lng: item.lng },
+                dogFriendly: trip.petFriendly,
+                addedFrom: 'wizard',
+                createdAt: new Date().toISOString()
+              });
+            } else {
+              const docPayload: any = {
+                title: item.title,
+                category: category,
+                startDateTime: startLocal.toISO(),
+                endDateTime: finalEndLocal.toISO(),
+                timezone: itemTz,
+                locationName: item.locationName,
+                address: item.address,
+                notes: item.notes,
+                dogFriendly: trip.petFriendly,
+                source: 'wizard',
+                status: item.status || 'confirmed',
+              };
+              if (item.lat !== undefined && item.lng !== undefined) {
+                docPayload.coordinates = { lat: item.lat, lng: item.lng };
+              }
+              if (item.options) {
+                docPayload.options = item.options;
+              }
+              await addDoc(eventsColl, docPayload);
+            }
           }
         }
       }
