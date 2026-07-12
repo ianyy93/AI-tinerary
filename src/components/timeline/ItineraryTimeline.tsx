@@ -9,7 +9,7 @@ import { collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, query, order
 import { Trip, ItineraryEvent, EventCategory, Day } from '../../types';
 import { 
   Plus, Edit2, Trash2, Sparkles, MapPin, Clock, Home, Plane, Compass, X, Utensils, Info, 
-  Dog, AlertCircle, FileText, CheckCircle2, Link, Globe, ChevronRight, HelpCircle 
+  Dog, AlertCircle, FileText, CheckCircle2, Link, Globe, ChevronRight, HelpCircle, Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { DateTime } from 'luxon';
@@ -20,8 +20,10 @@ interface ItineraryTimelineProps {
   trip: Trip;
   selectedDayId: string | null;
   days: Day[];
-  onSelectDay: (dayId: string) => void;
+  onSelectDay: (dayId: string | null) => void;
   userRole: 'owner' | 'editor' | 'viewer';
+  viewMode: 'timeline' | 'shortlist' | 'bookings';
+  onChangeViewMode: (viewMode: 'timeline' | 'shortlist' | 'bookings') => void;
 }
 
 const CATEGORIES: { value: EventCategory; label: string; icon: any; colorClass: string; textClass: string }[] = [
@@ -46,7 +48,15 @@ const COMMON_TIMEZONES = [
   'Australia/Sydney',
 ];
 
-export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectDay, userRole }: ItineraryTimelineProps) {
+export default function ItineraryTimeline({ 
+  trip, 
+  selectedDayId, 
+  days, 
+  onSelectDay, 
+  userRole,
+  viewMode,
+  onChangeViewMode
+}: ItineraryTimelineProps) {
   const [events, setEvents] = useState<ItineraryEvent[]>([]);
   const [shortlistItems, setShortlistItems] = useState<any[]>([]);
   const [overnightMarkers, setOvernightMarkers] = useState<{start: string[], end: string[]}>({ start: [], end: [] });
@@ -155,10 +165,11 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
   }, [trip.id]);
 
   useEffect(() => {
-    if (!trip.id || (!selectedDayId && selectedDayId !== 'shortlist') || (!days.length && selectedDayId !== 'shortlist')) return;
+    if (!trip.id) return;
+    if (viewMode === 'shortlist') return;
 
-    const isStaysFlights = selectedDayId === 'stays-flights';
-    const currentDay = days.find(d => d.id === selectedDayId);
+    const isStaysFlights = viewMode === 'bookings';
+    const currentDay = viewMode === 'timeline' ? days.find(d => d.id === selectedDayId) : null;
     if (!currentDay && !isStaysFlights) return;
 
     const eventsRef = collection(db, `trips/${trip.id}/events`);
@@ -229,7 +240,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     });
 
     return () => unsubscribe();
-  }, [trip.id, selectedDayId, days]);
+  }, [trip.id, selectedDayId, days, viewMode]);
 
   // Open modal for addition
   const openAddModal = () => {
@@ -238,10 +249,10 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setShortlistSourceId(null);
     setTitle('');
     
-    const isStaysFlights = selectedDayId === 'stays-flights';
+    const isStaysFlights = viewMode === 'bookings';
     setCategory(isStaysFlights ? 'stay' : 'activity');
     
-    const currentDay = isStaysFlights ? days[0] : days.find(d => d.id === selectedDayId);
+    const currentDay = isStaysFlights ? days[0] : (viewMode === 'timeline' ? days.find(d => d.id === selectedDayId) : days[0]);
     const dateStr = currentDay ? currentDay.dateStr : new Date().toISOString().split('T')[0];
     setStartDateTimeLocal(`${dateStr}T09:00`);
     setEndDateTimeLocal(`${dateStr}T10:00`);
@@ -285,6 +296,13 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
 
   // Open modal for edit
   const openEditModal = (event: ItineraryEvent) => {
+    if (event.reviewed === false) {
+      const eventDocRef = doc(db, `trips/${trip.id}/events`, event.id);
+      updateDoc(eventDocRef, { reviewed: true }).catch(err => {
+        console.error("Error marking event as reviewed:", err);
+      });
+      event.reviewed = true;
+    }
     if (userRole === 'viewer') return;
     setEditingEvent(event);
     setShortlistSourceId(null);
@@ -384,6 +402,8 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
         updatedAt: new Date().toISOString(),
         timeUnknown: false,
         status: editingEvent ? (editingEvent.status || 'confirmed') : 'confirmed',
+        source: editingEvent ? (editingEvent.source || 'manual') : 'manual',
+        reviewed: editingEvent ? (editingEvent.reviewed !== undefined ? editingEvent.reviewed : true) : true,
       };
 
       if (editingEvent && editingEvent.options) {
@@ -507,6 +527,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
           notes: ev.notes || '',
           isAnchor: true,
           source: 'anchor',
+          reviewed: false,
           reservationNumber: ev.isBooked ? 'Confirmed' : '',
           timezone: ev.timezone || inferTimezone(trip.destination),
           coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null,
@@ -530,104 +551,106 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
       <div className="flex items-center justify-between pb-4 border-b border-slate-100" id="tabs-header">
         <div className="flex items-center gap-2">
           <Globe className="h-4.5 w-4.5 text-indigo-500" />
-          <h2 className="font-display font-bold text-base text-slate-900">Trip Timeline</h2>
+          <h2 className="font-display font-bold text-base text-slate-900">
+            {viewMode === 'timeline' && "Trip Timeline"}
+            {viewMode === 'shortlist' && "My Shortlist"}
+            {viewMode === 'bookings' && "Stays & Flights"}
+          </h2>
         </div>
 
         {userRole !== 'viewer' && (
           <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsBookingModalOpen(true)}
-            className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-emerald-50 hover:bg-emerald-100 border-emerald-100 text-emerald-700"
-            title="Add Booking (AI)"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Add Booking
-          </button>
-          <button
-            onClick={openAddModal}
-            className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-700"
-            title="Add Stop"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Add Stop
-          </button>
-        </div>
+            {(viewMode === 'timeline' || viewMode === 'bookings') && (
+              <button
+                onClick={() => setIsBookingModalOpen(true)}
+                className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-emerald-50 hover:bg-emerald-100 border-emerald-100 text-emerald-700 cursor-pointer"
+                title="Add Booking (AI)"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Add Booking (AI)
+              </button>
+            )}
+            {viewMode !== 'shortlist' && (
+              <button
+                onClick={openAddModal}
+                className="flex items-center gap-1 px-3 py-1.5 border rounded-lg text-xs font-bold transition bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-700 cursor-pointer"
+                title={viewMode === 'bookings' ? 'Add Custom Stay / Flight' : 'Add Custom Stop'}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {viewMode === 'bookings' ? 'Add Booking' : 'Add Stop'}
+              </button>
+            )}
+          </div>
         )}
+      </div>
+
+      {/* View Mode Segmented Tab Control */}
+      <div className="flex p-1 bg-slate-100/80 border border-slate-200/40 rounded-xl mt-3 mb-2 gap-1 shrink-0" id="view-mode-tabs">
+        <button
+          onClick={() => onChangeViewMode('timeline')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+            viewMode === 'timeline'
+              ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
+          }`}
+        >
+          <Calendar className="h-3.5 w-3.5" />
+          Timeline
+        </button>
+        <button
+          onClick={() => onChangeViewMode('shortlist')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+            viewMode === 'shortlist'
+              ? 'bg-white text-purple-600 shadow-sm border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
+          }`}
+        >
+          <FileText className="h-3.5 w-3.5" />
+          Shortlist {shortlistItems.length > 0 && `(${shortlistItems.length})`}
+        </button>
+        <button
+          onClick={() => onChangeViewMode('bookings')}
+          className={`flex-1 py-2 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+            viewMode === 'bookings'
+              ? 'bg-white text-emerald-600 shadow-sm border border-slate-200/50'
+              : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50/50'
+          }`}
+        >
+          <Home className="h-3.5 w-3.5" />
+          Bookings
+        </button>
       </div>
 
       {/* Days Scroller */}
-      <div className="flex gap-2 overflow-x-auto py-3 border-b border-slate-100 scrollbar-none" id="days-tabs">
-        {days.length > 0 && (
-          <>
-          <button
-            onClick={() => onSelectDay('shortlist')}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition flex flex-col items-center justify-center ${
-              selectedDayId === 'shortlist'
-                ? 'bg-purple-600 border-purple-600 text-white shadow-md shadow-purple-100'
-                : 'bg-purple-50 border-purple-100 text-purple-800 hover:bg-purple-100'
-            }`}
-          >
-            <div className="font-bold">📝 Shortlist {shortlistItems.length > 0 && `(${shortlistItems.length})`}</div>
-            <div className={`text-[9px] ${selectedDayId === 'shortlist' ? 'text-purple-100' : 'text-purple-600'} mt-0.5`}>
-              Unscheduled ideas
+      {viewMode === 'timeline' && (
+        <div className="flex gap-2 overflow-x-auto py-3 border-b border-slate-100 scrollbar-none" id="days-tabs">
+          {days.length === 0 ? (
+            <div className="text-xs text-slate-400 font-medium py-2 px-1">
+              No dates set yet. Click <b>Edit Trip</b> above to set dates.
             </div>
-          </button>
-          <button
-            onClick={() => onSelectDay('stays-flights')}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition flex flex-col items-center justify-center ${
-              selectedDayId === 'stays-flights'
-                ? 'bg-emerald-600 border-emerald-600 text-white shadow-md shadow-emerald-100'
-                : 'bg-emerald-50 border-emerald-100 text-emerald-800 hover:bg-emerald-100'
-            }`}
-          >
-            <div className="font-bold">🏨 Stays & Flights</div>
-            <div className={`text-[9px] ${selectedDayId === 'stays-flights' ? 'text-emerald-100' : 'text-emerald-600'} mt-0.5`}>
-              All bookings
-            </div>
-          </button>
-          {userRole !== 'viewer' && (
-            <button
-              onClick={() => setIsBookingModalOpen(true)}
-              className="px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border border-emerald-200/60 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition flex flex-col items-center justify-center cursor-pointer"
-              title="Add Booking (AI)"
-            >
-              <div className="font-bold flex items-center gap-1">
-                <Sparkles className="h-3.5 w-3.5 text-emerald-600 animate-pulse" /> Add a booking
-              </div>
-              <div className="text-[9px] text-emerald-500 mt-0.5 font-normal">
-                Paste confirmations
-              </div>
-            </button>
+          ) : (
+            days.map((day) => {
+              const isSelected = selectedDayId === day.id;
+              return (
+                <button
+                  key={day.id}
+                  onClick={() => onSelectDay(day.id)}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition cursor-pointer ${
+                    isSelected 
+                      ? 'bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100' 
+                      : 'bg-slate-50 border-slate-100 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <div className="font-bold">{day.title}</div>
+                  <div className={`text-[10px] ${isSelected ? 'text-indigo-100' : 'text-slate-400'} mt-0.5`}>
+                    {day.dateStr.split('-').slice(1).join('/')}
+                  </div>
+                </button>
+              );
+            })
           )}
-          </>
-        )}
-
-        {days.length === 0 ? (
-          <div className="text-xs text-slate-400 font-medium py-2 px-1">
-            No dates set yet. Click <b>Edit Trip</b> above to set dates.
-          </div>
-        ) : (
-          days.map((day) => {
-            const isSelected = selectedDayId === day.id;
-            return (
-              <button
-                key={day.id}
-                onClick={() => onSelectDay(day.id)}
-                className={`px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border transition ${
-                  isSelected 
-                    ? 'bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-100' 
-                    : 'bg-slate-50 border-slate-100 text-slate-600 hover:bg-slate-100'
-                }`}
-              >
-                <div className="font-bold">{day.title}</div>
-                <div className={`text-[10px] ${isSelected ? 'text-indigo-100' : 'text-slate-400'} mt-0.5`}>
-                  {day.dateStr.split('-').slice(1).join('/')}
-                </div>
-              </button>
-            );
-          })
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Timezone display for current active day */}
       {events.length > 0 && (
@@ -681,7 +704,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
         </div>
       )}
 
-      {selectedDayId === 'shortlist' ? (
+      {viewMode === 'shortlist' ? (
         <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-3">
           {shortlistItems.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -746,18 +769,41 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
 
         return (
           <div className="flex-1 overflow-y-auto mt-4 pr-1 relative flex flex-col gap-6" id="timeline-list">
+            {filteredEvents.filter(e => e.reviewed === false).length > 0 && (
+              <div className="flex items-center justify-between bg-amber-50/75 border border-amber-200/60 rounded-xl px-4 py-2.5 shadow-sm border-dashed">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-amber-500 shrink-0" />
+                  <p className="text-xs text-amber-900 font-bold leading-relaxed">
+                    New stops added by AI Travel Copilot
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    const unreviewedOnDay = filteredEvents.filter(e => e.reviewed === false);
+                    for (const ev of unreviewedOnDay) {
+                      const eventDocRef = doc(db, `trips/${trip.id}/events`, ev.id);
+                      await updateDoc(eventDocRef, { reviewed: true });
+                    }
+                  }}
+                  className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] rounded-lg shadow-sm transition shrink-0 cursor-pointer"
+                >
+                  Mark all reviewed
+                </button>
+              </div>
+            )}
+
             {filteredEvents.length === 0 && overnightMarkers.start.length === 0 && overnightMarkers.end.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Compass className="h-10 w-10 text-slate-300 animate-pulse mb-3" />
                 <h4 className="font-display font-bold text-sm text-slate-800">
-                  {selectedDayId === 'stays-flights' 
+                  {viewMode === 'bookings' 
                     ? 'No Stays or Flights Logged' 
                     : events.length === 0 
                       ? 'No Stops Planned Yet' 
                       : 'No Stops for this Traveler'}
                 </h4>
                 <p className="text-xs text-slate-400 max-w-xs mt-1.5">
-                  {selectedDayId === 'stays-flights'
+                  {viewMode === 'bookings'
                     ? 'Add accommodation locations (hotels, stays) or transit flights using the Add Stop button!'
                     : events.length === 0 
                       ? 'Select our AI travel copilot panel to curate a custom itinerary with a single wizard-wizard flow!'
@@ -766,7 +812,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                 {events.length === 0 && userRole !== 'viewer' && (
                   <button 
                     onClick={() => {
-                      if (selectedDayId === 'stays-flights') {
+                      if (viewMode === 'bookings') {
                         setIsBookingModalOpen(true);
                       } else {
                         openAddModal();
@@ -774,7 +820,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                     }}
                     className="mt-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-lg border border-slate-200 transition"
                   >
-                    {selectedDayId === 'stays-flights' ? 'Add Stay / Flight (AI)' : 'Add Custom Stop'}
+                    {viewMode === 'bookings' ? 'Add Stay / Flight (AI)' : 'Add Custom Stop'}
                   </button>
                 )}
               </div>
@@ -815,6 +861,7 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
 
                   const isPending = event.status === 'pending';
                   const isExpanded = expandedPendingEventId === event.id;
+                  const isUnreviewed = event.reviewed === false;
 
                   return (
                     <React.Fragment key={event.id}>
@@ -822,15 +869,19 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                         initial={{ opacity: 0, x: -5 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: index * 0.05 }}
-                        className={`relative group bg-white border rounded-xl p-4 shadow-sm transition ${
+                        className={`relative group bg-white border rounded-xl p-4 shadow-sm transition cursor-pointer ${
                           isPending 
-                            ? 'border-dashed border-2 border-indigo-300 hover:border-indigo-400/90 bg-indigo-50/5 cursor-pointer' 
-                            : 'border-slate-100 hover:border-slate-200/80 hover:shadow-md'
+                            ? 'border-dashed border-2 border-indigo-300 hover:border-indigo-400/90 bg-indigo-50/5' 
+                            : isUnreviewed
+                              ? 'border-amber-300/85 bg-amber-50/15 hover:border-amber-400/95 shadow-sm shadow-amber-50/55 hover:shadow-md ring-1 ring-amber-300/35'
+                              : 'border-slate-100 hover:border-slate-200/80 hover:shadow-md'
                         }`}
                         onClick={() => {
                           if (isPending) {
                             setExpandedPendingEventId(isExpanded ? null : event.id);
                             setCustomOptionText('');
+                          } else {
+                            openEditModal(event);
                           }
                         }}
                       >
@@ -846,6 +897,12 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                               <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-md ${cat.colorClass}`}>
                                 {cat.label}
                               </span>
+                              {isUnreviewed && (
+                                <span className="bg-amber-500 text-white px-1.5 py-0.5 rounded text-[9px] font-extrabold flex items-center gap-1 shadow-sm shadow-amber-500/20 animate-pulse uppercase tracking-wider" title="Newly added suggestion, not reviewed yet">
+                                  <span className="h-1 w-1 rounded-full bg-white shrink-0 animate-ping" />
+                                  New
+                                </span>
+                              )}
                               {isPending && (
                                 <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] font-bold border border-indigo-200 animate-pulse flex items-center gap-1">
                                   <HelpCircle className="h-3 w-3 text-indigo-500" />

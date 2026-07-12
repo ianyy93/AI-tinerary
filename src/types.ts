@@ -60,6 +60,7 @@ export interface ItineraryEvent {
   source?: 'manual' | 'wizard' | 'anchor' | 'ai-suggested';
   status?: 'confirmed' | 'pending';
   options?: EventOption[];
+  reviewed?: boolean;
 }
 
 export interface Day {

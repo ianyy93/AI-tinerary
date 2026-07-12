@@ -56,6 +56,7 @@ const migrateTripEvents = async (tripId: string, currentSchemaVersion: number, d
           startDateTime,
           endDateTime,
           timezone,
+          reviewed: true,
         });
 
         await deleteDoc(doc(db, `trips/${tripId}/days/${day.id}/events`, eventDoc.id));
@@ -79,6 +80,7 @@ interface TripViewProps {
 export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
   const [trip, setTrip] = useState<Trip | null>(null);
   const [days, setDays] = useState<Day[]>([]);
+  const [viewMode, setViewMode] = useState<'timeline' | 'shortlist' | 'bookings'>('timeline');
   const [selectedDayId, setSelectedDayId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -298,12 +300,12 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
       setDays(items);
 
       if (items.length > 0) {
-        const stillExists = selectedDayId === 'stays-flights' || items.some(d => d.id === selectedDayId);
+        const stillExists = items.some(d => d.id === selectedDayId);
         if (!stillExists) {
           setSelectedDayId(items[0].id);
         }
       } else {
-        setSelectedDayId(selectedDayId === 'stays-flights' ? 'stays-flights' : null);
+        setSelectedDayId(null);
       }
       setLoading(false);
     }, (err) => {
@@ -618,6 +620,8 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
               days={days}
               onSelectDay={setSelectedDayId}
               userRole={userRole}
+              viewMode={viewMode}
+              onChangeViewMode={setViewMode}
             />
           </div>
 
@@ -627,6 +631,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
               trip={trip}
               selectedDayId={selectedDayId}
               days={days}
+              viewMode={viewMode}
             />
           </div>
 
@@ -637,6 +642,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
               selectedDayId={selectedDayId}
               days={days}
               userRole={userRole}
+              viewMode={viewMode}
             />
           </div>
         </div>
@@ -651,6 +657,8 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                 days={days}
                 onSelectDay={setSelectedDayId}
                 userRole={userRole}
+                viewMode={viewMode}
+                onChangeViewMode={setViewMode}
               />
             )}
             {mobileTab === 'map' && (
@@ -658,6 +666,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                 trip={trip}
                 selectedDayId={selectedDayId}
                 days={days}
+                viewMode={viewMode}
               />
             )}
             {mobileTab === 'copilot' && (
@@ -666,6 +675,7 @@ export default function TripView({ tripId, user, onBackToHub }: TripViewProps) {
                 selectedDayId={selectedDayId}
                 days={days}
                 userRole={userRole}
+                viewMode={viewMode}
               />
             )}
           </div>

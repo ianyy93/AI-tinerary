@@ -39,6 +39,24 @@ service cloud.firestore {
         allow read: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
         allow write: if isTripOwnerOrEditor(get(/databases/$(database)/documents/trips/$(tripId)).data);
       }
+
+      // Days Subcollection
+      match /days/{dayId} {
+        allow read: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        allow write: if isTripOwnerOrEditor(get(/databases/$(database)/documents/trips/$(tripId)).data);
+
+        // Nested events (legacy/migration)
+        match /events/{eventId} {
+          allow read: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
+          allow write: if isTripOwnerOrEditor(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        }
+      }
+
+      // Shortlist Subcollection
+      match /shortlist/{shortlistId} {
+        allow read: if hasTripAccess(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        allow write: if isTripOwnerOrEditor(get(/databases/$(database)/documents/trips/$(tripId)).data);
+      }
     }
   }
 }

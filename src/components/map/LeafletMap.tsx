@@ -17,6 +17,7 @@ interface LeafletMapProps {
   trip: Trip;
   selectedDayId: string | null;
   days: Day[];
+  viewMode: 'timeline' | 'shortlist' | 'bookings';
 }
 
 // Custom map recenterer helper using the useMap hook
@@ -49,7 +50,7 @@ function MapDestinationRecenter({ center }: { center: [number, number] | null })
   return null;
 }
 
-export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProps) {
+export default function LeafletMap({ trip, selectedDayId, days, viewMode }: LeafletMapProps) {
   const [dayEvents, setDayEvents] = useState<ItineraryEvent[]>([]);
   const [destinationCenter, setDestinationCenter] = useState<[number, number] | null>(null);
 
@@ -86,11 +87,19 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
 
   // 1. Fetch events with coordinates for this specific day (or all stays & flights)
   useEffect(() => {
-    if (!trip.id || !selectedDayId || !days.length) return;
+    if (!trip.id || !days.length) return;
 
-    const isStaysFlights = selectedDayId === 'stays-flights';
-    const currentDay = days.find(d => d.id === selectedDayId);
-    if (!currentDay && !isStaysFlights) return;
+    if (viewMode === 'shortlist') {
+      setDayEvents([]);
+      return;
+    }
+
+    const isStaysFlights = viewMode === 'bookings';
+    const currentDay = viewMode === 'timeline' ? days.find(d => d.id === selectedDayId) : null;
+    if (!currentDay && !isStaysFlights) {
+      setDayEvents([]);
+      return;
+    }
 
     const eventsRef = collection(db, `trips/${trip.id}/events`);
 
@@ -119,7 +128,7 @@ export default function LeafletMap({ trip, selectedDayId, days }: LeafletMapProp
     });
 
     return () => unsubscribe();
-  }, [trip.id, selectedDayId, days]);
+  }, [trip.id, selectedDayId, days, viewMode]);
 
   // Extract lat/lng array for bounds calculations
   const coordinates: [number, number][] = dayEvents.map(e => [e.coordinates!.lat, e.coordinates!.lng]);

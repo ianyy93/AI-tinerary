@@ -924,6 +924,7 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
                             notes: ev.notes || '',
                             isAnchor: true,
                             source: 'anchor',
+                            reviewed: false,
                             reservationNumber: ev.isBooked ? 'Confirmed' : '',
                             timezone: ev.timezone || 'UTC',
                             coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null

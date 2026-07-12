@@ -20,6 +20,7 @@ interface CopilotPanelProps {
   selectedDayId: string | null;
   days: Day[];
   userRole: 'owner' | 'editor' | 'viewer';
+  viewMode: 'timeline' | 'shortlist' | 'bookings';
 }
 
 const WIZARD_STEPS = [
@@ -31,7 +32,7 @@ const WIZARD_STEPS = [
   { step: 6, name: 'Logistics & scenic drives', desc: 'Scenic travel paths, transfers, or helpful travel hacks.' },
 ];
 
-export default function CopilotPanel({ trip, selectedDayId, days, userRole }: CopilotPanelProps) {
+export default function CopilotPanel({ trip, selectedDayId, days, userRole, viewMode }: CopilotPanelProps) {
   // Wizard States
   const [activeStep, setActiveStep] = useState<number | null>(null);
   const [showWizardConfig, setShowWizardConfig] = useState(false);
@@ -131,7 +132,13 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
 
   // Load cached advice/proposedChanges if reopened with nothing changed since
   useEffect(() => {
-    if (!selectedDayId || !trip.id) return;
+    if (viewMode !== 'timeline' || !selectedDayId || !trip.id) {
+      setActionResponse('');
+      setProposedChanges([]);
+      setActionError('');
+      setIsCached(false);
+      return;
+    }
     const currentDay = days.find(d => d.id === selectedDayId);
     if (!currentDay) return;
 
@@ -168,7 +175,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
     setProposedChanges([]);
     setActionError('');
     setIsCached(false);
-  }, [selectedDayId, trip.id, events, trip.destination, days]);
+  }, [selectedDayId, trip.id, events, trip.destination, days, viewMode]);
 
   // 1. Generate current Wizard Step
   const handleGenerateStep = async (stepNum: number) => {
@@ -292,6 +299,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
             reservationNumber,
             timeUnknown: true,
             source: 'wizard',
+            reviewed: false,
           });
 
           const startLocalOut = DateTime.fromFormat(`${lastDay.dateStr} 08:00`, 'yyyy-MM-dd HH:mm', { zone: stayTz });
@@ -310,6 +318,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
             reservationNumber,
             timeUnknown: true,
             source: 'wizard',
+            reviewed: false,
           });
         }
         
@@ -369,6 +378,7 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                 notes: item.notes,
                 dogFriendly: trip.petFriendly,
                 source: 'wizard',
+                reviewed: false,
                 status: item.status || 'confirmed',
               };
               if (item.lat !== undefined && item.lng !== undefined) {
@@ -474,7 +484,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           locationName: change.event.locationName || change.event.title,
           notes: change.event.notes || '',
           dogFriendly: trip.petFriendly,
-          source: 'ai-suggested'
+          source: 'ai-suggested',
+          reviewed: false
         });
       } else if (change.type === 'update' && change.eventId) {
         const docRef = doc(db, `trips/${trip.id}/events`, change.eventId);
@@ -483,7 +494,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
           startDateTime,
           endDateTime,
           timezone: changeTz,
-          source: 'ai-suggested'
+          source: 'ai-suggested',
+          reviewed: false
         });
       } else if (change.type === 'delete' && change.eventId) {
         const docRef = doc(db, `trips/${trip.id}/events`, change.eventId);
@@ -903,8 +915,8 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                   <button
                     key={action.id}
                     onClick={() => handleCopilotAction(action.id as any)}
-                    disabled={isExecutingAction || !selectedDayId}
-                    className="py-2 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-[11px] font-bold border border-slate-700/60 transition cursor-pointer"
+                    disabled={isExecutingAction || !selectedDayId || viewMode !== 'timeline'}
+                    className="py-2 bg-slate-800 hover:bg-slate-700/80 rounded-xl text-[11px] font-bold border border-slate-700/60 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {action.label}
                   </button>
@@ -921,13 +933,13 @@ export default function CopilotPanel({ trip, selectedDayId, days, userRole }: Co
                   placeholder="e.g. 'Add a coffee shop stop at 3pm', 'remove all hiking'"
                   value={customDayPrompt}
                   onChange={(e) => setCustomDayPrompt(e.target.value)}
-                  disabled={isExecutingAction || !selectedDayId}
-                  className="flex-1 text-xs bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500"
+                  disabled={isExecutingAction || !selectedDayId || viewMode !== 'timeline'}
+                  className="flex-1 text-xs bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 disabled:opacity-40"
                 />
                 <button
                   onClick={() => handleCopilotAction('custom')}
-                  disabled={isExecutingAction || !selectedDayId || !customDayPrompt.trim()}
-                  className="px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer"
+                  disabled={isExecutingAction || !selectedDayId || !customDayPrompt.trim() || viewMode !== 'timeline'}
+                  className="px-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 rounded-lg text-xs font-bold transition flex items-center gap-1 shrink-0 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <Sparkles className="h-3 w-3" />
                   Apply

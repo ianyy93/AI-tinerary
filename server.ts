@@ -51,8 +51,8 @@ async function generateContentWithRetry(
   maxRetries = 3
 ): Promise<any> {
   let delay = 1000;
-  // Fallback chain: Primary -> gemini-2.5-flash -> gemini-3.1-flash-lite
-  const models = Array.from(new Set([params.model, 'gemini-2.5-flash', 'gemini-3.1-flash-lite']));
+  // Fallback chain: Primary -> gemini-3.5-flash -> gemini-3.1-flash-lite
+  const models = Array.from(new Set([params.model, 'gemini-3.5-flash', 'gemini-3.1-flash-lite']));
 
   for (const model of models) {
     let attempt = 0;
@@ -158,7 +158,7 @@ IMPORTANT DATE RULES:
 User Text: "${anchorText}"`;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -389,7 +389,7 @@ CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated
     let response;
     try {
       response = await generateContentWithRetry(ai, {
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         contents: stepPrompt,
         config: {
           systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -405,7 +405,7 @@ CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated
       if (errMsg.includes('quota') || errMsg.includes('exhausted') || errMsg.includes('429') || errMsg.includes('grounding') || code === 429) {
         console.warn("Grounding failed due to quota/exhausted. Retrying without tools array.");
         response = await generateContentWithRetry(ai, {
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.5-flash',
           contents: stepPrompt,
           config: {
             systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -456,10 +456,10 @@ Use the 'advice' field to describe your logic and rationale to the user.`;
 
     // Task-based model tiering: 
     // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly, custom) to the cheapest/fastest eligible model (gemini-3.1-flash-lite)
-    // - Reserve the premium model (gemini-2.5-flash) for more complex, less frequent calls (full-day replans)
+    // - Reserve the premium model (gemini-3.5-flash) for more complex, less frequent calls (full-day replans)
     const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly' || action === 'custom')
       ? 'gemini-3.1-flash-lite'
-      : 'gemini-2.5-flash';
+      : 'gemini-3.5-flash';
 
     const response = await generateContentWithRetry(ai, {
       model: modelToUse,
@@ -528,7 +528,7 @@ Return ONLY a valid JSON object matching this schema:
 Do not include any markdown formatting, backticks, or extra explanation. Just raw JSON.`;
 
         const aiResponse = await generateContentWithRetry(ai, {
-          model: 'gemini-2.5-flash',
+          model: 'gemini-3.5-flash',
           contents: prompt,
           config: {
             temperature: 0.1,
@@ -589,7 +589,7 @@ ${emailText}
 `;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       contents: prompt,
       config: {
         temperature: 0.1,
