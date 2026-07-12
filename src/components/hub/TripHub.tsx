@@ -889,17 +889,26 @@ export default function TripHub({ user, onSelectTrip, onLogout }: TripHubProps) 
                       const calculatedEnd = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
 
                       try {
+                        const userIdentifier = user.email || user.uid;
+                        const userEmail = (user.email || '').toLowerCase();
                         const tripRef = await addDoc(collection(db, 'trips'), {
                           title: events[0].title + ' Trip',
                           destination: events[0].locationName || 'Unknown Destination',
                           startDate: calculatedStart,
                           endDate: calculatedEnd,
                           tripType: 'mixed',
-                          coverColor: 'bg-blue-50 border-blue-100 text-blue-700',
+                          coverColor: 'Sapphire',
                           petFriendly: false,
+                          status: 'planning',
+                          userId: user.uid,
+                          collaborators: {
+                            [userIdentifier]: 'owner'
+                          },
+                          collaboratorEmails: userEmail ? [userEmail] : [],
+                          collaboratorUids: [user.uid],
+                          schemaVersion: 2,
                           createdAt: new Date().toISOString(),
-                          updatedAt: new Date().toISOString(),
-                          roles: { [user.uid]: 'owner' }
+                          updatedAt: new Date().toISOString()
                         });
 
                         for (const ev of events) {

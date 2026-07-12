@@ -51,8 +51,8 @@ async function generateContentWithRetry(
   maxRetries = 3
 ): Promise<any> {
   let delay = 1000;
-  // Fallback chain: Primary -> gemini-3.5-flash -> gemini-1.5-flash
-  const models = Array.from(new Set([params.model, 'gemini-3.5-flash', 'gemini-1.5-flash']));
+  // Fallback chain: Primary -> gemini-2.5-flash -> gemini-3.1-flash-lite
+  const models = Array.from(new Set([params.model, 'gemini-2.5-flash', 'gemini-3.1-flash-lite']));
 
   for (const model of models) {
     let attempt = 0;
@@ -117,42 +117,48 @@ app.post('/api/copilot/extract-anchor', async (req, res) => {
       properties: {
         title: { type: Type.STRING, description: "A suggested trip title (e.g. 'Denver Wedding Trip')" },
         destination: { type: Type.STRING, description: "Suggested destination city and state/country" },
-        startDate: { type: Type.STRING, description: "Suggested start date of the trip in YYYY-MM-DD format. If the user specifies explicit travel/booking dates, use those exact dates as-is with no padding/buffer days. Only pad/add buffer days around the anchor event when the anchor is vague and real travel dates aren't specified." },
-        endDate: { type: Type.STRING, description: "Suggested end date of the trip in YYYY-MM-DD format. If the user specifies explicit travel/booking dates, use those exact dates as-is with no padding/buffer days. Only pad/add buffer days around the anchor event when the anchor is vague and real travel dates aren't specified." },
-        anchorEvent: {
-          type: Type.OBJECT,
-          description: "Details of the fixed/booked anchor event itself",
-          properties: {
-            title: { type: Type.STRING, description: "Title of the anchor event (e.g. 'Sister's Wedding Ceremony')" },
-            category: { type: Type.STRING, description: "The category that best fits the event. Must be exactly one of: 'stay', 'travel', 'activity', 'food', 'logistics'" },
-            date: { type: Type.STRING, description: "The specific date of this event in YYYY-MM-DD format" },
-            startTime: { type: Type.STRING, description: "Start time in HH:MM format (24h), e.g. '17:00'. Use a reasonable guess if not specified." },
-            endTime: { type: Type.STRING, description: "End time in HH:MM format (24h), e.g. '21:00'. Use a reasonable guess if not specified." },
-            locationName: { type: Type.STRING, description: "Name of the venue/location" },
-            address: { type: Type.STRING, description: "Physical address of the venue if known or guessable" },
-            notes: { type: Type.STRING, description: "Brief notes about the event" },
-            lat: { type: Type.NUMBER, description: "Latitude coordinate of this location" },
-            lng: { type: Type.NUMBER, description: "Longitude coordinate" }, addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." },
-            isBooked: { type: Type.BOOLEAN, description: "True if the text implies this event is actually booked/confirmed (e.g. reservation numbers, 'I booked a hotel', 'got my tickets'). False if it is just a fixed date/event but not explicitly confirmed/booked yet." },
-            timezone: { type: Type.STRING, description: "The IANA timezone identifier (e.g. 'America/Denver', 'Asia/Tokyo', 'Europe/Paris', 'America/New_York') inferred from the destination or location of the event." }
-          },
-          required: ["title", "category", "date", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng", "isBooked", "timezone"]
+        startDate: { type: Type.STRING, description: "Suggested start date of the trip in YYYY-MM-DD format. Computed from the earliest event date across all extracted anchorEvents." },
+        endDate: { type: Type.STRING, description: "Suggested end date of the trip in YYYY-MM-DD format. Computed from the latest event date across all extracted anchorEvents." },
+        anchorEvents: {
+          type: Type.ARRAY,
+          description: "An array of fixed/booked anchor events extracted from the text",
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING, description: "Title of the anchor event (e.g. 'Sister's Wedding Ceremony' or 'Flight UA123 to LAX')" },
+              category: { type: Type.STRING, description: "The category that best fits the event. Must be exactly one of: 'stay', 'travel', 'activity', 'food', 'logistics'" },
+              date: { type: Type.STRING, description: "The specific date of this event in YYYY-MM-DD format" },
+              startTime: { type: Type.STRING, description: "Start time in HH:MM format (24h), e.g. '17:00'. Use a reasonable guess if not specified." },
+              endTime: { type: Type.STRING, description: "End time in HH:MM format (24h), e.g. '21:00'. Use a reasonable guess if not specified." },
+              locationName: { type: Type.STRING, description: "Name of the venue/location/hotel/airport" },
+              address: { type: Type.STRING, description: "Physical address of the venue if known or guessable" },
+              notes: { type: Type.STRING, description: "Brief notes about the event" },
+              lat: { type: Type.NUMBER, description: "Latitude coordinate of this location" },
+              lng: { type: Type.NUMBER, description: "Longitude coordinate" },
+              addToShortlist: { type: Type.BOOLEAN, description: "Set to true if this is a great idea but you do not have a strong basis for placing it on a specific day or time, or if the user implies just brainstorming. If true, it will be routed to the Shortlist instead of the timeline. Leave startTime and endTime empty if this is true." },
+              isBooked: { type: Type.BOOLEAN, description: "True if the text implies this event is actually booked/confirmed (e.g. reservation numbers, 'I booked a hotel', 'got my tickets'). False if it is just a fixed date/event but not explicitly confirmed/booked yet." },
+              timezone: { type: Type.STRING, description: "The IANA timezone identifier (e.g. 'America/Denver', 'Asia/Tokyo', 'Europe/Paris', 'America/New_York') inferred from the destination or location of the event." }
+            },
+            required: ["title", "category", "date", "startTime", "endTime", "locationName", "address", "notes", "lat", "lng", "isBooked", "timezone"]
+          }
         }
       },
-      required: ["title", "destination", "startDate", "endDate", "anchorEvent"]
+      required: ["title", "destination", "startDate", "endDate", "anchorEvents"]
     };
 
-    const prompt = `You are an expert travel assistant. Analyze the user text below describing a fixed anchor event (like a wedding, concert, reservation) and extract the trip title, destination, suggested date range, and the details of the anchor event. 
+    const prompt = `You are an expert travel assistant. Analyze the user text below describing one or more fixed anchor events (like weddings, concerts, reservations, flights, hotel stays) and extract the trip title, destination, overall suggested date range, and the details of all extracted anchor events in an array.
+A single paste like "flight confirmed for the 29th, and I already booked the Four Seasons for the same dates" should return two entries in the anchorEvents array.
+
 The current date is ${todayStr}. Use this to resolve relative date descriptions like 'next month', 'third week of September', 'this weekend', etc.
 
 IMPORTANT DATE RULES:
-1. If the user specifies explicit travel dates (e.g., specific flight confirmation dates, explicit check-in/check-out hotel hotel dates, or clear travel dates like 'Jul 29-30' or 'August 1 to August 5'), do NOT add any padding or buffer days. Set startDate and endDate to those exact dates.
-2. Only add 2-3 buffer days before and after the anchor event if the anchor is vague (e.g. 'the third week of September', or a single day mentioned with no indication of trip length or duration) and real travel dates are not otherwise specified.
+1. If the user specifies explicit travel dates (e.g., specific flight confirmation dates, explicit check-in/check-out hotel dates, or clear travel dates like 'Jul 29-30' or 'August 1 to August 5'), do NOT add any padding or buffer days. Set startDate and endDate to those exact dates.
+2. Only add 2-3 buffer days before and after the anchor events if the anchors are vague (e.g. 'the third week of September', or a single day mentioned with no indication of trip length or duration) and real travel dates are not otherwise specified.
 
 User Text: "${anchorText}"`;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-3.5-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -383,7 +389,7 @@ CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated
     let response;
     try {
       response = await generateContentWithRetry(ai, {
-        model: 'gemini-3.5-flash',
+        model: 'gemini-2.5-flash',
         contents: stepPrompt,
         config: {
           systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -399,7 +405,7 @@ CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated
       if (errMsg.includes('quota') || errMsg.includes('exhausted') || errMsg.includes('429') || errMsg.includes('grounding') || code === 429) {
         console.warn("Grounding failed due to quota/exhausted. Retrying without tools array.");
         response = await generateContentWithRetry(ai, {
-          model: 'gemini-3.5-flash',
+          model: 'gemini-2.5-flash',
           contents: stepPrompt,
           config: {
             systemInstruction: "You are an elite, local-expert travel planning assistant. Generate realistic coordinates (latitude and longitude) that are within or very close to the destination city/region so the map is perfectly aligned. Do not hallucinate invalid coordinate numbers. Return standard JSON matching the requested schema exactly.",
@@ -449,11 +455,11 @@ Use the 'advice' field to describe your logic and rationale to the user.`;
     }
 
     // Task-based model tiering: 
-    // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly) to the cheapest/fastest eligible model (gemini-1.5-flash)
-    // - Reserve the premium model (gemini-3.5-flash) for more complex, less frequent calls (full-day replans or custom edits)
-    const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly')
-      ? 'gemini-1.5-flash'
-      : 'gemini-3.5-flash';
+    // - Route lightweight/frequent asks (reorder, connection-check, dog-friendly, custom) to the cheapest/fastest eligible model (gemini-3.1-flash-lite)
+    // - Reserve the premium model (gemini-2.5-flash) for more complex, less frequent calls (full-day replans)
+    const modelToUse = (action === 'reorder' || action === 'connection-check' || action === 'dog-friendly' || action === 'custom')
+      ? 'gemini-3.1-flash-lite'
+      : 'gemini-2.5-flash';
 
     const response = await generateContentWithRetry(ai, {
       model: modelToUse,
@@ -522,7 +528,7 @@ Return ONLY a valid JSON object matching this schema:
 Do not include any markdown formatting, backticks, or extra explanation. Just raw JSON.`;
 
         const aiResponse = await generateContentWithRetry(ai, {
-          model: 'gemini-3.5-flash',
+          model: 'gemini-2.5-flash',
           contents: prompt,
           config: {
             temperature: 0.1,
@@ -583,7 +589,7 @@ ${emailText}
 `;
 
     const response = await generateContentWithRetry(ai, {
-      model: 'gemini-3.5-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         temperature: 0.1,

@@ -695,10 +695,16 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                 </p>
                 {events.length === 0 && userRole !== 'viewer' && (
                   <button 
-                    onClick={openAddModal}
+                    onClick={() => {
+                      if (selectedDayId === 'stays-flights') {
+                        setIsBookingModalOpen(true);
+                      } else {
+                        openAddModal();
+                      }
+                    }}
                     className="mt-4 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-lg border border-slate-200 transition"
                   >
-                    {selectedDayId === 'stays-flights' ? 'Add Stay / Flight' : 'Add Custom Stop'}
+                    {selectedDayId === 'stays-flights' ? 'Add Stay / Flight (AI)' : 'Add Custom Stop'}
                   </button>
                 )}
               </div>
@@ -1076,7 +1082,35 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
             <div className="p-5 overflow-y-auto">
               <AnchorExtractionFlow
                 onConfirm={async (events) => {
+                  if (events.length === 0) return;
                   try {
+                    const sortedDates = events.map(e => new Date(e.date).getTime()).sort((a,b) => a-b);
+                    const earliestStr = new Date(sortedDates[0]).toISOString().split('T')[0];
+                    const latestStr = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
+
+                    let updatedStart = trip.startDate;
+                    let updatedEnd = trip.endDate;
+
+                    if (!updatedStart || earliestStr < updatedStart) {
+                      updatedStart = earliestStr;
+                    }
+                    if (!updatedEnd || latestStr > updatedEnd) {
+                      updatedEnd = latestStr;
+                    }
+
+                    const updates: any = {};
+                    if (updatedStart !== trip.startDate) updates.startDate = updatedStart;
+                    if (updatedEnd !== trip.endDate) updates.endDate = updatedEnd;
+
+                    if (trip.status === 'planning' || trip.status === 'upcoming' || trip.status === 'draft' || trip.status === 'dreaming') {
+                      updates.status = 'booking';
+                    }
+
+                    if (Object.keys(updates).length > 0) {
+                      updates.updatedAt = new Date().toISOString();
+                      await updateDoc(doc(db, 'trips', trip.id), updates);
+                    }
+
                     for (const ev of events) {
                       const startDateTime = `${ev.date}T${ev.startTime}`;
                       const endDateTime = `${ev.date}T${ev.endTime}`;
@@ -1092,7 +1126,8 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
                         source: 'anchor',
                         reservationNumber: ev.isBooked ? 'Confirmed' : '',
                         timezone: ev.timezone || inferTimezone(trip.destination),
-                        coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null
+                        coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null,
+                        status: 'confirmed'
                       });
                     }
                     setIsBookingModalOpen(false);

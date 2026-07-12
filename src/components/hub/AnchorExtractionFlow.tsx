@@ -154,6 +154,30 @@ export function AnchorExtractionFlow({ onConfirm, onCancel }: { onConfirm: (even
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Location Name</label>
                   <input type="text" value={ev.locationName} onChange={e => updateEvent(ev.id, 'locationName', e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs" />
                 </div>
+                <div className="flex flex-col gap-1 col-span-2">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Street Address</label>
+                  <input type="text" value={ev.address || ''} onChange={e => updateEvent(ev.id, 'address', e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs" />
+                </div>
+                <div className="flex flex-col gap-1 col-span-2">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Notes</label>
+                  <textarea rows={2} value={ev.notes || ''} onChange={e => updateEvent(ev.id, 'notes', e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs resize-none" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Timezone</label>
+                  <select value={ev.timezone} onChange={e => updateEvent(ev.id, 'timezone', e.target.value)} className="px-3 py-1.5 border border-slate-200 rounded-lg text-xs bg-white">
+                    <option value="UTC">UTC</option>
+                    <option value="America/New_York">America/New_York</option>
+                    <option value="America/Chicago">America/Chicago</option>
+                    <option value="America/Denver">America/Denver</option>
+                    <option value="America/Los_Angeles">America/Los_Angeles</option>
+                    <option value="Europe/London">Europe/London</option>
+                    <option value="Europe/Paris">Europe/Paris</option>
+                    <option value="Asia/Tokyo">Asia/Tokyo</option>
+                    <option value="Asia/Seoul">Asia/Seoul</option>
+                    <option value="Asia/Singapore">Asia/Singapore</option>
+                    <option value="Australia/Sydney">Australia/Sydney</option>
+                  </select>
+                </div>
                 <div className="flex items-center gap-1.5 col-span-2">
                   <input type="checkbox" id={`booked-${ev.id}`} checked={ev.isBooked} onChange={e => updateEvent(ev.id, 'isBooked', e.target.checked)} className="h-3.5 w-3.5" />
                   <label htmlFor={`booked-${ev.id}`} className="text-[11px] font-bold text-indigo-800">Already Booked / Confirmed</label>
