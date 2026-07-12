@@ -82,6 +82,8 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
   const [eventTravelerIds, setEventTravelerIds] = useState<string[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isGeocoding, setIsGeocoding] = useState(false);
+  const [pendingEvents, setPendingEvents] = useState<any[] | null>(null);
+  const [showExpandConfirm, setShowExpandConfirm] = useState(false);
   
 
   
@@ -463,6 +465,60 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
     setPendingDeletes(prev => prev.filter(id => id !== eventId));
   };
 
+  const executeSaveEvents = async (eventsToSave: any[]) => {
+    try {
+      const sortedDates = eventsToSave.map(e => new Date(e.date).getTime()).sort((a,b) => a-b);
+      const earliestStr = new Date(sortedDates[0]).toISOString().split('T')[0];
+      const latestStr = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
+
+      let updatedStart = trip.startDate;
+      let updatedEnd = trip.endDate;
+
+      if (!updatedStart || earliestStr < updatedStart) {
+        updatedStart = earliestStr;
+      }
+      if (!updatedEnd || latestStr > updatedEnd) {
+        updatedEnd = latestStr;
+      }
+
+      const updates: any = {};
+      if (updatedStart !== trip.startDate) updates.startDate = updatedStart;
+      if (updatedEnd !== trip.endDate) updates.endDate = updatedEnd;
+
+      if (trip.status === 'planning' || trip.status === 'upcoming' || trip.status === 'draft' || trip.status === 'dreaming') {
+        updates.status = 'booking';
+      }
+
+      if (Object.keys(updates).length > 0) {
+        updates.updatedAt = new Date().toISOString();
+        await updateDoc(doc(db, 'trips', trip.id), updates);
+      }
+
+      for (const ev of eventsToSave) {
+        const startDateTime = `${ev.date}T${ev.startTime}`;
+        const endDateTime = `${ev.date}T${ev.endTime}`;
+        await addDoc(collection(db, `trips/${trip.id}/events`), {
+          category: ev.category,
+          title: ev.title,
+          startDateTime,
+          endDateTime,
+          locationName: ev.locationName,
+          address: ev.address || '',
+          notes: ev.notes || '',
+          isAnchor: true,
+          source: 'anchor',
+          reservationNumber: ev.isBooked ? 'Confirmed' : '',
+          timezone: ev.timezone || inferTimezone(trip.destination),
+          coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null,
+          status: 'confirmed'
+        });
+      }
+      setIsBookingModalOpen(false);
+    } catch (e) {
+      console.error("Failed to add booking events:", e);
+    }
+  };
+
   // Get category config helper
   const getCatConfig = (cat: EventCategory) => {
     return CATEGORIES.find(c => c.value === cat) || CATEGORIES[2];
@@ -529,6 +585,20 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
               All bookings
             </div>
           </button>
+          {userRole !== 'viewer' && (
+            <button
+              onClick={() => setIsBookingModalOpen(true)}
+              className="px-4 py-2 rounded-xl text-xs font-semibold shrink-0 border border-emerald-200/60 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition flex flex-col items-center justify-center cursor-pointer"
+              title="Add Booking (AI)"
+            >
+              <div className="font-bold flex items-center gap-1">
+                <Sparkles className="h-3.5 w-3.5 text-emerald-600 animate-pulse" /> Add a booking
+              </div>
+              <div className="text-[9px] text-emerald-500 mt-0.5 font-normal">
+                Paste confirmations
+              </div>
+            </button>
+          )}
           </>
         )}
 
@@ -1081,58 +1151,22 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
             </div>
             <div className="p-5 overflow-y-auto">
               <AnchorExtractionFlow
+                tripId={trip.id}
                 onConfirm={async (events) => {
                   if (events.length === 0) return;
-                  try {
-                    const sortedDates = events.map(e => new Date(e.date).getTime()).sort((a,b) => a-b);
-                    const earliestStr = new Date(sortedDates[0]).toISOString().split('T')[0];
-                    const latestStr = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
+                  
+                  const sortedDates = events.map(e => new Date(e.date).getTime()).sort((a,b) => a-b);
+                  const earliestStr = new Date(sortedDates[0]).toISOString().split('T')[0];
+                  const latestStr = new Date(sortedDates[sortedDates.length - 1]).toISOString().split('T')[0];
 
-                    let updatedStart = trip.startDate;
-                    let updatedEnd = trip.endDate;
+                  const hasExistingDates = trip.startDate && trip.endDate;
+                  const isOutside = hasExistingDates && (earliestStr < trip.startDate || latestStr > trip.endDate);
 
-                    if (!updatedStart || earliestStr < updatedStart) {
-                      updatedStart = earliestStr;
-                    }
-                    if (!updatedEnd || latestStr > updatedEnd) {
-                      updatedEnd = latestStr;
-                    }
-
-                    const updates: any = {};
-                    if (updatedStart !== trip.startDate) updates.startDate = updatedStart;
-                    if (updatedEnd !== trip.endDate) updates.endDate = updatedEnd;
-
-                    if (trip.status === 'planning' || trip.status === 'upcoming' || trip.status === 'draft' || trip.status === 'dreaming') {
-                      updates.status = 'booking';
-                    }
-
-                    if (Object.keys(updates).length > 0) {
-                      updates.updatedAt = new Date().toISOString();
-                      await updateDoc(doc(db, 'trips', trip.id), updates);
-                    }
-
-                    for (const ev of events) {
-                      const startDateTime = `${ev.date}T${ev.startTime}`;
-                      const endDateTime = `${ev.date}T${ev.endTime}`;
-                      await addDoc(collection(db, `trips/${trip.id}/events`), {
-                        category: ev.category,
-                        title: ev.title,
-                        startDateTime,
-                        endDateTime,
-                        locationName: ev.locationName,
-                        address: ev.address || '',
-                        notes: ev.notes || '',
-                        isAnchor: true,
-                        source: 'anchor',
-                        reservationNumber: ev.isBooked ? 'Confirmed' : '',
-                        timezone: ev.timezone || inferTimezone(trip.destination),
-                        coordinates: ev.lat && ev.lng ? { lat: ev.lat, lng: ev.lng } : null,
-                        status: 'confirmed'
-                      });
-                    }
-                    setIsBookingModalOpen(false);
-                  } catch (e) {
-                    console.error("Failed to add booking events:", e);
+                  if (isOutside) {
+                    setPendingEvents(events);
+                    setShowExpandConfirm(true);
+                  } else {
+                    await executeSaveEvents(events);
                   }
                 }}
                 onCancel={() => setIsBookingModalOpen(false)}
@@ -1429,6 +1463,46 @@ export default function ItineraryTimeline({ trip, selectedDayId, days, onSelectD
           </div>
         )}
       </AnimatePresence>
+
+      {showExpandConfirm && pendingEvents && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[99999] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-100 p-6 shadow-2xl max-w-md w-full flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 text-amber-600">
+              <AlertCircle className="h-6 w-6 shrink-0" />
+              <h4 className="font-display font-bold text-base text-slate-900">Expand Trip Dates?</h4>
+            </div>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              Some of your added bookings fall outside your current trip dates (<span className="font-semibold text-slate-800">{trip.startDate}</span> to <span className="font-semibold text-slate-800">{trip.endDate}</span>).
+              <br /><br />
+              Would you like to expand the trip's date range to include these new bookings?
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExpandConfirm(false);
+                  setPendingEvents(null);
+                }}
+                className="px-4 py-2 border border-slate-200 hover:bg-slate-50 text-slate-500 rounded-xl text-xs font-bold transition"
+              >
+                No, Go Back
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const eventsToSave = pendingEvents;
+                  setShowExpandConfirm(false);
+                  setPendingEvents(null);
+                  await executeSaveEvents(eventsToSave);
+                }}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-md shadow-indigo-100"
+              >
+                Yes, Expand & Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

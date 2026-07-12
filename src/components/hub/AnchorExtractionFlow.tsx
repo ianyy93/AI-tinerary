@@ -18,7 +18,15 @@ interface AnchorEventData {
   timezone: string;
 }
 
-export function AnchorExtractionFlow({ onConfirm, onCancel }: { onConfirm: (events: AnchorEventData[]) => void, onCancel: () => void }) {
+export function AnchorExtractionFlow({ 
+  onConfirm, 
+  onCancel, 
+  tripId 
+}: { 
+  onConfirm: (events: AnchorEventData[]) => void; 
+  onCancel: () => void;
+  tripId?: string;
+}) {
   const [anchorText, setAnchorText] = useState('');
   const [isExtracting, setIsExtracting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
