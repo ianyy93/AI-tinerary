@@ -52,7 +52,15 @@ export function AnchorExtractionFlow({
       });
 
       if (!response.ok) {
-        throw new Error("Failed to extract details from text.");
+        let errMsg = "Failed to extract details from text.";
+        try {
+          const errText = await response.text();
+          const parsed = JSON.parse(errText);
+          errMsg = parsed.error || errMsg;
+        } catch (e) {
+          // ignore
+        }
+        throw new Error(errMsg);
       }
 
       const result = await response.json();

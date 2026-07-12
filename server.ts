@@ -37,6 +37,15 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
+function cleanAndParseJSON(text: string): any {
+  if (!text) return null;
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  }
+  return JSON.parse(cleaned.trim());
+}
+
 /**
  * A robust wrapper for calling Gemini API with automatic exponential backoff retry on transient 503/429 errors,
  * and automatic fallback to a secondary model if the primary model is busy or unavailable.
@@ -168,7 +177,7 @@ User Text: "${anchorText}"`;
       },
     });
 
-    res.json({ success: true, data: JSON.parse(response.text || '{}') });
+    res.json({ success: true, data: cleanAndParseJSON(response.text || '{}') });
   } catch (error: any) {
     console.error('Extract Anchor AI Error:', error);
     res.status(500).json({ success: false, error: error.message || 'AI Extraction Failed' });
@@ -419,7 +428,7 @@ CRITICAL USER CUSTOM PREFERENCES/REQUEST: Please tailor and adjust the generated
       }
     }
 
-    res.json({ success: true, data: JSON.parse(response.text || '[]') });
+    res.json({ success: true, data: cleanAndParseJSON(response.text || '[]') });
   } catch (error: any) {
     console.error('Wizard Step AI Error:', error);
     res.status(500).json({ success: false, error: error.message || 'AI Generation Failed' });
@@ -472,7 +481,7 @@ Use the 'advice' field to describe your logic and rationale to the user.`;
     });
 
     try {
-      const parsed = JSON.parse(response.text || '{}');
+      const parsed = cleanAndParseJSON(response.text || '{}');
       res.json({ success: true, advice: parsed.advice || 'No advice generated.', proposedChanges: parsed.proposedChanges || [] });
     } catch (e) {
       res.json({ success: true, advice: response.text || 'No advice generated.', proposedChanges: [] });
@@ -537,7 +546,7 @@ Do not include any markdown formatting, backticks, or extra explanation. Just ra
         });
 
         const text = aiResponse.text || '';
-        const parsed = JSON.parse(text.trim());
+        const parsed = cleanAndParseJSON(text);
         if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
           data = [{
             lat: parsed.lat.toString(),
@@ -597,7 +606,7 @@ ${emailText}
       }
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    const parsed = cleanAndParseJSON(response.text || '{}');
     res.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Email Parse Error:', error);
